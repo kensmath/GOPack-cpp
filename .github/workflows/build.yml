@@ -1,0 +1,61 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+          - os: macos-latest
+            name: macos-arm64
+          - os: macos-13
+            name: macos-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK (for the JNI target)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package artifacts (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir dist
+          copy build\cli\Release\gopack.exe dist\ 2>NUL || copy build\cli\gopack.exe dist\
+          copy build\jni\cpp\Release\gopack_jni.dll dist\ 2>NUL || copy build\jni\cpp\gopack_jni.dll dist\
+        shell: cmd
+        continue-on-error: true
+
+      - name: Package artifacts (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist
+          cp build/cli/gopack dist/ || true
+          cp build/jni/cpp/libgopack_jni.dylib dist/ || true
+        continue-on-error: true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gopack-cpp-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: warn
