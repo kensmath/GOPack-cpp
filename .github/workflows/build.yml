@@ -13,10 +13,19 @@ jobs:
         include:
           - os: windows-latest
             name: windows-x64
+            cmake_extra_args: ""
           - os: macos-latest
-            name: macos-arm64
-          - os: macos-13
-            name: macos-x64
+            name: macos-universal
+            # Builds one universal ("fat") binary containing both Apple
+            # Silicon (arm64) and Intel (x86_64) code in the same
+            # libgopack_jni.dylib/gopack, so downstream consumers (e.g. a
+            # Java jar bundling native libraries) only need to ship a
+            # single macOS artifact instead of picking arm64 vs x64 at
+            # runtime. Works from a single arm64 runner because Apple's
+            # clang cross-compiles for x86_64 regardless of host
+            # architecture; Eigen is header-only so there's nothing
+            # architecture-specific to worry about on that side.
+            cmake_extra_args: "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +37,7 @@ jobs:
           java-version: '17'
 
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_extra_args }}
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -51,6 +60,7 @@ jobs:
           mkdir -p dist
           cp build/cli/gopack dist/ || true
           cp build/jni/cpp/libgopack_jni.dylib dist/ || true
+          file dist/* || true
         continue-on-error: true
 
       - name: Upload artifacts
