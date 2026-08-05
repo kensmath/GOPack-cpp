@@ -25,7 +25,12 @@ jobs:
             # clang cross-compiles for x86_64 regardless of host
             # architecture; Eigen is header-only so there's nothing
             # architecture-specific to worry about on that side.
-            cmake_extra_args: "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+            # Quoted so the ';' survives bash's parsing as part of the
+            # -DCMAKE_OSX_ARCHITECTURES value instead of being read as a
+            # command separator (which silently truncated this to
+            # "...=arm64" and then tried to run a second, bogus command
+            # literally named "x86_64" -- exit code 127, "command not found").
+            cmake_extra_args: '-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
