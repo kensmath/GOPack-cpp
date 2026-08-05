@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cstdio>
 #include <fstream>
+#include <istream>
 #include <sstream>
 
 #include "gopack/Geometry.h"
@@ -25,10 +26,42 @@ bool startsWith(const std::string& s, const char* prefix) {
     return s.size() >= len && s.compare(0, len, prefix) == 0;
 }
 
+// Attempts to read one integer; on failure, rewinds the stream to just
+// before the attempt (clearing any fail state) so the un-consumed token is
+// left for the caller to read as something else. This mirrors MATLAB's
+// fscanf(fid,'%d',N), which reads as many of the N requested integers as it
+// can and simply stops -- without erroring or losing its place -- the
+// moment it hits a non-numeric token. A plain `in >> x` does not have that
+// "stop gracefully" behavior, which matters here: some *.p files write
+// "ALPHA/GAMMA: a g" (2 values) while others write
+// "ALPHA/BETA/GAMMA: a b g" (3 values), and the reader has to accept both.
+bool tryReadInt(std::istream& in, Index& out) {
+    auto pos = in.tellg();
+    if (in >> out) return true;
+    in.clear();
+    in.seekg(pos);
+    return false;
+}
+
 } // namespace
 
 Index Packer::readpack(const std::string& fname) {
-    std::ifstream in(fname);
+    // Open in binary mode deliberately. On Windows, a text-mode ifstream
+    // translates "\r\n" -> "\n" on read, and tellg()/seekg() on a text-mode
+    // stream return/accept opaque positions that are only reliably valid at
+    // very specific points -- they are NOT guaranteed to be plain byte
+    // offsets, and round-tripping them across a formatted extraction
+    // attempt (as tryReadInt does below, to support both the 2- and
+    // 3-value ALPHA/GAMMA and ALPHA/BETA/GAMMA variants) can silently land
+    // the read position at the wrong place. That desyncs every token read
+    // after the rewind -- in practice this was observed to skip the
+    // "BOUQUET:"/"FLOWERS:" keyword entirely, leaving `flowers` empty and
+    // crashing complexCount() on its very first access. Binary mode makes
+    // tellg()/seekg() plain, reliable byte offsets on every platform; the
+    // token/getline-based parsing below already treats '\r' as whitespace
+    // (std::isspace includes it), so a stray trailing '\r' per line from
+    // CRLF files is harmless.
+    std::ifstream in(fname, std::ios::binary);
     if (!in) {
         std::fprintf(stderr, "Failed to read packing file %s\n", fname.c_str());
         return 0;
@@ -75,11 +108,21 @@ Index Packer::readpack(const std::string& fname) {
         std::string tok;
         if (!(in >> tok)) break;
 
-        if (startsWith(tok, "ALPH")) { // ALPHA/BETA/GAMMA
+        if (startsWith(tok, "ALPH")) {
+            // Two file variants exist: "ALPHA/BETA/GAMMA: a b g" (3 values,
+            // beta unused) and "ALPHA/GAMMA: a g" (2 values). Read as many
+            // as are actually present, matching the MATLAB fscanf behavior
+            // described above tryReadInt's definition.
             Index a = 0, b = 0, c = 0;
-            in >> a >> b >> c;
-            alpha = a;
-            gamma = c;
+            bool haveA = tryReadInt(in, a);
+            bool haveB = haveA && tryReadInt(in, b);
+            bool haveC = haveB && tryReadInt(in, c);
+            if (haveA) alpha = a;
+            if (haveC) {
+                gamma = c; // 3 values: alpha, beta (unused), gamma
+            } else if (haveB) {
+                gamma = b; // 2 values: alpha, gamma
+            }
         } else if (startsWith(tok, "GEOM")) { // GEOMETRY:
             std::string g;
             in >> g;

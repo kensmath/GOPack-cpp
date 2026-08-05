@@ -19,11 +19,16 @@
 // *.p FLOWERS format), complex_count, indxMatrices, setMode, layoutBdry /
 // setHoroCenters, the continueRiffle/layoutCenters/setEffective iteration,
 // and writepack/writeEucl with hyperbolic/spherical output conversion.
-// Polygonal and rectangle packing modes (setPolyCenters/setRectCenters),
-// the triangle-list and OFF input readers (parse_triangles), orphan removal
-// (pruneComplex), and random-triangulation generation are understood (see
-// the corresponding .m files) but not yet ported; calling those methods
-// throws NotImplementedError rather than guessing.
+// Polygonal and rectangle packing mode (mode 2: setMode's polygonal branch,
+// setPolyCenters, setRectCenters, getAspect) is also ported: layoutBdry
+// dispatches to setPolyCenters/setRectCenters instead of setHoroCenters when
+// mode==2, and the shared continueRiffle/layoutCenters/setEffective
+// iteration handles both modes without change (setEffective already
+// branches on the sign of vAims, which setMode sets appropriately per
+// mode). The triangle-list and OFF input readers (parse_triangles), orphan
+// removal (pruneComplex), and random-triangulation generation are
+// understood (see the corresponding .m files) but not yet ported; calling
+// those methods throws NotImplementedError rather than guessing.
 #include <complex>
 #include <stdexcept>
 #include <string>
@@ -104,10 +109,10 @@ public:
     std::vector<std::vector<Scalar>> inRadii; // inRadii[k] indexed by layout-index k
     std::vector<Scalar> conduct;              // conduct[k] indexed by layout-index k
 
-    std::vector<Index> corners; // polygonal mode: corner vertices (deferred feature)
-    std::vector<std::vector<Index>> sides;
+    std::vector<Index> corners; // polygonal mode: corner vertices, in cclw order
+    std::vector<std::vector<Index>> sides; // sides[i] = closed bdry-vertex run from corners[i] to corners[i+1]
 
-    int mode = 1; // 1 = max pack, 2 = polygonal (not yet ported)
+    int mode = 1; // 1 = max pack, 2 = polygonal
 
     std::vector<Scalar> angsumMonitor;
     std::vector<Scalar> l2Monitor;
@@ -144,11 +149,22 @@ public:
     // layoutBdry.m
     void layoutBdry();
 
-    // setRectCenters.m / setPolyCenters.m -- NOT YET PORTED (polygonal mode).
+    // setRectCenters.m / setPolyCenters.m -- polygonal/rectangle boundary
+    // layout. setPolyCenters dispatches to setRectCenters itself when there
+    // are 4 corners all within 1e-5 of a right angle (the default for
+    // sideN==4 with no custom corner angles); layoutBdry() is what actually
+    // calls setPolyCenters when mode==2.
     void setRectCenters();
     void setPolyCenters();
 
-    // setMode.m
+    // setMode.m. mdIn: 1 = max pack, 2 = polygonal. For mode 2, 'crns' is an
+    // optional list of corner vertices (by original vertex index, in cclw
+    // order); if empty, corners are inferred from 'vlist' or else chosen
+    // pseudo-randomly, mirroring GOPacker.m's nargin<3 behavior (a by-value
+    // C++ vector can't distinguish "omitted" from "explicitly empty" the
+    // way MATLAB's nargin can, so an empty 'crns' here always means
+    // "figure out the corners for me", the more useful default). 'angs' is
+    // an optional matching list of corner target angles.
     int setMode(int mdIn, const std::vector<Index>& crns = {}, const std::vector<Scalar>& angs = {});
 
     // layoutCenters.m
@@ -160,7 +176,8 @@ public:
     // reapResults.m
     void reapResults();
 
-    // getAspect.m -- NOT YET PORTED (polygonal/rectangle mode only).
+    // getAspect.m -- ratio (top+bot)/(left+right) side lengths; mode 2 with
+    // exactly 4 corners only. Returns -1 (and prints a diagnostic) otherwise.
     Scalar getAspect();
 
     // angsumErrors.m

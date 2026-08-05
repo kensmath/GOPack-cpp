@@ -33,13 +33,18 @@ extern "C" {
 // tolerance (currently informational only -- see NOTE below), int
 // maxPasses)
 //
-// Returns the euclidean radii for every vertex, indices 1..nodeCount packed
-// into a 0-indexed Java array of length nodeCount (i.e. Java index i holds
-// vertex i+1's radius). NOTE: 'tolerance' is accepted for forward
-// compatibility with the eventual configurable stopping criterion, but the
-// current port uses GOPack's fixed 0.01 visual-error cutoff
-// (continueRiffle.m's 'cutval'); a future pass can thread a real tolerance
-// through once that's wired up.
+// Returns the euclidean radii for every vertex, as an array of length
+// nodeCount+1 with radii[v] holding vertex v's radius for v = 1..nodeCount
+// (matching GOPack/CirclePack's own 1-indexed vertex numbering, and the
+// same convention core/include/gopack/Packer.h uses throughout); radii[0]
+// is unused/unspecified. This is a deliberate choice over a "natural" Java
+// 0-indexed array with radii[i] = vertex (i+1)'s radius: keeping vertex v
+// at index v everywhere -- MATLAB, the C++ core, and now this bridge --
+// means a caller never has to remember or apply an off-by-one translation.
+// NOTE: 'tolerance' is accepted for forward compatibility with the
+// eventual configurable stopping criterion, but the current port uses
+// GOPack's fixed 0.01 visual-error cutoff (continueRiffle.m's 'cutval'); a
+// future pass can thread a real tolerance through once that's wired up.
 JNIEXPORT jdoubleArray JNICALL
 Java_org_kensmath_gopack_GOPackNative_computeMaximalPacking(
     JNIEnv* env, jclass /*clazz*/, jstring inputPath, jint /*geometryHint*/,
@@ -65,14 +70,16 @@ Java_org_kensmath_gopack_GOPackNative_computeMaximalPacking(
         }
 
         // packer.radii is 1-indexed (size nodeCount+1, index 0 unused);
-        // copy to a 0-indexed Java array of length nodeCount.
-        const jsize n = static_cast<jsize>(packer.nodeCount);
+        // return it as-is (same size, same indexing) rather than shifting
+        // to a 0-indexed Java array, so radii[v] is always vertex v's
+        // radius on both sides of the JNI boundary.
+        const jsize n = static_cast<jsize>(packer.nodeCount) + 1;
         jdoubleArray out = env->NewDoubleArray(n);
         if (out == nullptr) {
             throwGOPackException(env, "Failed to allocate result array");
             return nullptr;
         }
-        env->SetDoubleArrayRegion(out, 0, n, packer.radii.data() + 1);
+        env->SetDoubleArrayRegion(out, 0, n, packer.radii.data());
         return out;
     } catch (const std::exception& e) {
         throwGOPackException(env, e.what());

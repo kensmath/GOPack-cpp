@@ -25,18 +25,31 @@ endif()
 # ---------------------------------------------------------------------------
 # Eigen (header-only sparse/dense linear algebra, MPL2 license)
 # ---------------------------------------------------------------------------
-include(FetchContent)
-FetchContent_Declare(
-    Eigen3
-    GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-    GIT_TAG        3.4.0
-    GIT_SHALLOW    TRUE
-)
 # We only need the headers; skip Eigen's own tests/docs/build targets.
 set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(EIGEN_BUILD_PKGCONFIG OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(Eigen3)
+
+if(EXISTS "${CMAKE_SOURCE_DIR}/eigen/CMakeLists.txt")
+    # A local Eigen checkout (e.g. `git clone https://gitlab.com/libeigen/eigen.git`
+    # into ./eigen) takes priority over fetching from the network -- this is
+    # both faster on repeat configures and lets the project build fully
+    # offline once Eigen has been cloned once. add_subdirectory(eigen) defines
+    # the same Eigen3::Eigen INTERFACE target that FetchContent_MakeAvailable
+    # would below, so nothing downstream needs to know which path was taken.
+    message(STATUS "GOPack: using local Eigen checkout at ${CMAKE_SOURCE_DIR}/eigen")
+    add_subdirectory(eigen)
+else()
+    message(STATUS "GOPack: no local ./eigen checkout found; fetching Eigen 3.4.0 via CMake FetchContent")
+    include(FetchContent)
+    FetchContent_Declare(
+        Eigen3
+        GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+        GIT_TAG        3.4.0
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(Eigen3)
+endif()
 
 # ---------------------------------------------------------------------------
 # Core engine (static library, no Java/CLI dependencies)

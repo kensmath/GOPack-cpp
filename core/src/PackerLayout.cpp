@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <random>
 #include <stdexcept>
 
 namespace gopack {
@@ -44,14 +45,232 @@ int Packer::setMode(int mdIn, const std::vector<Index>& crns, const std::vector<
         return md;
     }
 
-    (void)crns;
-    (void)angs;
-    mode = -1;
-    throw NotImplementedError(
-        "Packer::setMode: polygonal packing mode (mode 2) has not been ported "
-        "yet (see setMode.m's mode==2 branch, and setPolyCenters.m / "
-        "setRectCenters.m). The scoped first pass of this port covers "
-        "maximal packing (mode 1) only.");
+    // ---- m == 2: polygonal packing ----
+
+    // GOPacker.m's `obj.vAims(v)=val` assignments below auto-grow MATLAB's
+    // array if it's currently shorter than `v` -- std::vector::operator[]
+    // has no such safety net, so writing to an under-sized vAims here is
+    // undefined behavior (in practice: silent heap corruption in a Release
+    // build, not a clean crash). readpack() always leaves vAims sized
+    // nodeCount+1 before a caller could reach mode 2, but guarantee it here
+    // too so setMode(2, ...) is safe to call on its own, matching what the
+    // m==1 branch above already does unconditionally.
+    if (vAims.size() < static_cast<size_t>(nodeCount) + 1) {
+        vAims.resize(static_cast<size_t>(nodeCount) + 1, kTwoPi);
+    }
+
+    Index sideN = 4; // default number of sides for a polygon
+    std::vector<Index> cornersLocal; // local listing of corners, if given
+
+    // GOPacker.m distinguishes "crns wasn't passed at all" (nargin<3) from
+    // "crns was passed as an explicit empty array" (nargin>=3, cln==0) --
+    // C++ has no such distinction for a by-value vector default argument,
+    // so an empty 'crns' here is treated as "not given", falling straight
+    // through to the vlist/random corner-selection below, rather than
+    // MATLAB's stricter immediate "empty or too short" error. This is the
+    // more useful behavior for a caller (setMode(2) alone should mean "you
+    // figure out the corners"), and it only changes behavior for an
+    // explicitly-empty-but-passed argument, which C++ can't distinguish
+    // from "omitted" anyway.
+    if (!crns.empty()) {
+        Index cln = static_cast<Index>(crns.size());
+        if (cln == 2) {
+            std::fprintf(stderr, "Error: list of corners is empty or too short\n");
+            mode = -1;
+            return -1;
+        }
+        if (cln == 1) {
+            if (crns[0] > 2) {
+                sideN = crns[0];
+                if (!vlist.empty()) {
+                    if (static_cast<Index>(vlist.size()) > sideN) {
+                        vlist.resize(static_cast<size_t>(sideN)); // truncate
+                    } else if (static_cast<Index>(vlist.size()) < sideN) {
+                        vlist.clear(); // discard vlist
+                    }
+                }
+            }
+        } else {
+            sideN = cln;
+            cornersLocal.assign(static_cast<size_t>(sideN), 0);
+            for (Index k = 0; k < cln; ++k) {
+                Index cv = crns[static_cast<size_t>(k)];
+                if (bdryFlags[cv] != 1) {
+                    std::fprintf(stderr,
+                                 "Error: Your given \"corner\" %d is not a boundary vertex\n", cv);
+                    mode = -1;
+                    return -1;
+                }
+                cornersLocal[static_cast<size_t>(k)] = cv;
+            }
+        }
+
+        if (!angs.empty()) {
+            if (static_cast<Index>(angs.size()) != sideN) {
+                std::fprintf(stderr, "Numbers of corner vertices and angles do not match");
+                mode = -1;
+                return -1;
+            }
+            Scalar sum = 0.0;
+            for (Scalar a : angs) sum += a;
+            if (std::abs(sideN * kPi - sum - kTwoPi) > 0.01) {
+                std::fprintf(stderr,
+                             "Corner angles are not consistent with polygon turning angles");
+                mode = -1;
+                return -1;
+            }
+        }
+    }
+
+    // Corners not given? take bdry vertices in 'vlist' and infer sideN.
+    if (cornersLocal.empty() && vlist.size() >= 3) {
+        Index vln = static_cast<Index>(vlist.size());
+        cornersLocal.assign(static_cast<size_t>(vln), 0);
+        Index mctn = 0;
+        for (Index k = 0; k < vln; ++k) {
+            if (bdryFlags[vlist[static_cast<size_t>(k)]] != 0) {
+                cornersLocal[static_cast<size_t>(mctn)] = vlist[static_cast<size_t>(k)];
+                mctn++;
+            }
+        }
+        if (mctn < 3) { // didn't get enough? default to random below
+            cornersLocal.clear();
+        } else {
+            sideN = mctn;
+            cornersLocal.resize(static_cast<size_t>(sideN)); // trim to right length
+        }
+    }
+
+    // Still no corners? choose 'sideN' corners pseudo-randomly around bdryList.
+    if (cornersLocal.empty()) {
+        Index bl = static_cast<Index>(bdryList.size()); // closed list: bdryCount+1
+        if (bl < 3) {
+            std::fprintf(stderr, "The boundary has only %d vertices\n", bl);
+            mode = -1;
+            return -1;
+        } else if (bl == 3) { // triangle
+            sideN = 3;
+        } else if (bl < sideN) { // bl is maximum number of sides
+            sideN = bl;
+        }
+
+        cornersLocal.assign(static_cast<size_t>(sideN), 0);
+        Index fth = bl / sideN;
+        static thread_local std::mt19937 rng(std::random_device{}());
+        std::uniform_int_distribution<Index> dist(1, bl);
+        Index sd = dist(rng);
+        for (Index e = 0; e < sideN; ++e) {
+            cornersLocal[static_cast<size_t>(e)] = bdryList[static_cast<size_t>(sd) - 1];
+            sd = 1 + (sd + fth) % bl;
+        }
+        vlist = cornersLocal;
+        std::fprintf(stderr, "Corners not provided, so %d were chosen randomly\n", sideN);
+    }
+
+    // check length
+    sideN = static_cast<Index>(cornersLocal.size());
+    if (sideN < 3) {
+        std::fprintf(stderr, "Setting polygon mode requires at least 3 corners\n");
+        mode = -1;
+        return -1;
+    }
+
+    // set all bdry aims to pi, equal corner target angles as default
+    for (Index i = 1; i <= bdryCount; ++i) {
+        vAims[static_cast<size_t>(bdryList[static_cast<size_t>(i) - 1])] = kPi;
+    }
+    for (Index i = 0; i < sideN; ++i) {
+        vAims[static_cast<size_t>(cornersLocal[static_cast<size_t>(i)])] =
+            kPi * (1.0 - 2.0 / sideN);
+    }
+
+    if (!angs.empty()) { // 'angs' were specified
+        for (Index i = 0; i < sideN; ++i) {
+            vAims[static_cast<size_t>(cornersLocal[static_cast<size_t>(i)])] =
+                angs[static_cast<size_t>(i)];
+        }
+    }
+
+    // determine indices in bdryList so we can get cclw order
+    std::vector<Index> bdryIndx(static_cast<size_t>(sideN), 0);
+    for (Index i = 0; i < sideN; ++i) {
+        Index cnr = cornersLocal[static_cast<size_t>(i)];
+        for (Index j = 1; j <= bdryCount; ++j) {
+            if (bdryList[static_cast<size_t>(j) - 1] == cnr) {
+                bdryIndx[static_cast<size_t>(i)] = j;
+                break;
+            }
+        }
+        if (bdryIndx[static_cast<size_t>(i)] == 0) {
+            std::fprintf(stderr, "Vert %d is not a bdry vertex\n", cnr);
+            mode = -1;
+            return -1;
+        }
+    }
+
+    // The source's "put 'cornangs' in counterclockwise order" block
+    // (tmpcorners=corners; corners=zeros(...); corners(j)=bdryList(bdryIndx(j)))
+    // recomputes a local 'corners' variable that is never read again, and
+    // does so using an unsorted bdryIndx (its `sort(bdryIndx);` call never
+    // captures the result) -- so that whole block is dead code, faithfully
+    // omitted here. The only thing it produces that's used later is
+    // 'upright' = the first requested corner.
+    Index upright = cornersLocal[0];
+
+    std::vector<Index> sortedBdryIndx = bdryIndx;
+    std::sort(sortedBdryIndx.begin(), sortedBdryIndx.end());
+
+    Index offset = 1;
+    for (Index i = 2; i <= sideN; ++i) {
+        if (sortedBdryIndx[static_cast<size_t>(i) - 1] == upright) offset = i;
+    }
+
+    corners.assign(static_cast<size_t>(sideN), 0);
+    std::vector<Index> crnrIndices(static_cast<size_t>(sideN), 0);
+    for (Index i = 0; i < sideN; ++i) {
+        Index k = 1 + (offset - 1 + i) % sideN;
+        crnrIndices[static_cast<size_t>(i)] = sortedBdryIndx[static_cast<size_t>(k) - 1];
+        corners[static_cast<size_t>(i)] =
+            bdryList[static_cast<size_t>(crnrIndices[static_cast<size_t>(i)]) - 1];
+    }
+
+    // set up 'sides': for each corner, walk the closed bdryList forward
+    // (by bdryList-position, wrapping mod bdryCount) until the next corner
+    // is reached, collecting every boundary vertex along that side.
+    sides.assign(static_cast<size_t>(sideN), {});
+    for (Index i = 1; i <= sideN; ++i) {
+        Index cornerindx = crnrIndices[static_cast<size_t>(i) - 1];
+        Index j = 1 + (i % sideN);
+        Index nextcorner = crnrIndices[static_cast<size_t>(j) - 1];
+
+        std::vector<Index> sideIndices(static_cast<size_t>(bdryCount), 0);
+        sideIndices[0] = crnrIndices[static_cast<size_t>(i) - 1];
+        Index tick = 1;
+        while (sideIndices[static_cast<size_t>(tick) - 1] != nextcorner) {
+            Index k = (cornerindx + tick - 1) % bdryCount + 1;
+            tick++;
+            if (tick > bdryCount) {
+                std::fprintf(stderr, "error in getting sides\n");
+                mode = -1;
+                return -1;
+            }
+            sideIndices[static_cast<size_t>(tick) - 1] = k;
+        }
+
+        std::vector<Index> side(static_cast<size_t>(tick), 0);
+        for (Index jj = 1; jj <= tick; ++jj) {
+            side[static_cast<size_t>(jj) - 1] =
+                bdryList[static_cast<size_t>(sideIndices[static_cast<size_t>(jj) - 1]) - 1];
+        }
+        sides[static_cast<size_t>(i) - 1] = std::move(side);
+    }
+
+    mode = m;
+    md = m;
+    std::fprintf(stdout, "Mode is \"%s\", corner vertices are:", kPackModes[mode - 1]);
+    for (Index c : corners) std::fprintf(stdout, " %d", c);
+    std::fprintf(stdout, "\n");
+    return md;
 }
 
 void Packer::layoutBdry() {
@@ -63,21 +282,217 @@ void Packer::layoutBdry() {
 }
 
 void Packer::setRectCenters() {
-    throw NotImplementedError(
-        "Packer::setRectCenters: not yet ported (setRectCenters.m); "
-        "polygonal/rectangle packing mode is deferred.");
+    // Assumes mode==2, corners/sides already set by setMode(2, ...), and
+    // exactly 4 sides (setPolyCenters only calls this when num_sides==4
+    // and all four corner aims are within 1e-5 of a right angle).
+    std::vector<Scalar> sidelengths(4, 0.0);
+    for (int i = 0; i < 4; ++i) {
+        const auto& side = sides[static_cast<size_t>(i)];
+        Index n = static_cast<Index>(side.size());
+        Scalar longv = localradii[static_cast<size_t>(side[0])];
+        longv += localradii[static_cast<size_t>(side[static_cast<size_t>(n) - 1])];
+        for (Index j = 2; j <= n - 1; ++j) {
+            longv += 2.0 * localradii[static_cast<size_t>(side[static_cast<size_t>(j) - 1])];
+        }
+        sidelengths[static_cast<size_t>(i)] = longv;
+    }
+
+    Scalar width = (sidelengths[0] + sidelengths[2]) / 2.0;
+    Scalar height = (sidelengths[1] + sidelengths[3]) / 2.0;
+
+    Scalar aspect = height / width;
+    Scalar factor = 2.0 * (aspect + 1.0) / (width + height);
+    for (Index v = 1; v <= nodeCount; ++v) localradii[static_cast<size_t>(v)] *= factor;
+    for (auto& s : sidelengths) s *= factor;
+
+    // NOTE ("?????" in the source): despite the source comment describing
+    // "lowerleft (-aspect,-1), upper right (aspect,1)", the actual corner
+    // points below place the rectangle's real part in {+1,-1} and its
+    // imaginary part in {+aspect,-aspect} -- ported literally as written,
+    // not as commented.
+    const Complex crnpt[4] = {Complex(1.0, aspect), Complex(-1.0, aspect),
+                               Complex(-1.0, -aspect), Complex(1.0, -aspect)};
+    const Complex edgedir[4] = {Complex(-1.0, 0.0), Complex(0.0, -1.0), Complex(1.0, 0.0),
+                                 Complex(0.0, 1.0)};
+    const Scalar slength[4] = {2.0, 2.0 * aspect, 2.0, 2.0 * aspect};
+
+    for (int k = 0; k < 4; ++k) {
+        Scalar sidefactor = slength[static_cast<size_t>(k)] / sidelengths[static_cast<size_t>(k)];
+        const auto& side = sides[static_cast<size_t>(k)];
+        Index n = static_cast<Index>(side.size());
+        Scalar prev = localradii[static_cast<size_t>(corners[static_cast<size_t>(k)])];
+        Complex spot = crnpt[static_cast<size_t>(k)];
+        localcenters[static_cast<size_t>(side[0])] = spot;
+        // Only walks to n-2 (not n-1): the side's last vertex is the next
+        // corner, whose exact position is set directly as crnpt[k+1] at
+        // the top of the next iteration rather than accumulated here.
+        for (Index i = 1; i <= n - 2; ++i) {
+            Scalar next = localradii[static_cast<size_t>(side[static_cast<size_t>(i)])];
+            spot += sidefactor * edgedir[static_cast<size_t>(k)] * (prev + next);
+            localcenters[static_cast<size_t>(side[static_cast<size_t>(i)])] = spot;
+            prev = next;
+        }
+    }
 }
 
 void Packer::setPolyCenters() {
-    throw NotImplementedError(
-        "Packer::setPolyCenters: not yet ported (setPolyCenters.m); "
-        "polygonal/rectangle packing mode is deferred.");
+    if (mode != 2) {
+        std::fprintf(stderr, "setPolyCenters: mode must be %s\n", kPackModes[1]);
+        return;
+    }
+
+    Index numSides = static_cast<Index>(corners.size());
+    if (numSides < 3 || numSides != static_cast<Index>(sides.size()) || vAims.empty()) {
+        // Faithful to the source: setPolyCenters.m prints this diagnostic
+        // but has no early return here, so execution falls through even
+        // when the precondition fails. In practice this is unreachable
+        // when corners/sides came from setMode(2, ...), which guarantees
+        // numSides>=3 and a matching 'sides' array.
+        std::fprintf(stderr, "setPolyCenters: must have corners, sides, and aims.\n");
+    }
+
+    // check for rectangle first
+    if (numSides == 4) {
+        Scalar benderror = 0.0;
+        for (Index j = 0; j < 4; ++j) {
+            benderror +=
+                std::abs(vAims[static_cast<size_t>(corners[static_cast<size_t>(j)])] - kPi / 2.0);
+        }
+        if (benderror <= 0.00001) { // standard situation, right angles
+            setRectCenters();
+            return;
+        }
+    } // else, handled below by the n=even routines
+
+    // compute side lengths using 'localradii'
+    std::vector<Scalar> sidelengths(static_cast<size_t>(numSides), 0.0);
+    Scalar fullLength = 0.0;
+    std::vector<Scalar> targetLength(static_cast<size_t>(numSides), 1.0);
+    for (Index i = 0; i < numSides; ++i) {
+        const auto& side = sides[static_cast<size_t>(i)];
+        Index n = static_cast<Index>(side.size());
+        Scalar longv = localradii[static_cast<size_t>(side[0])];
+        longv += localradii[static_cast<size_t>(side[static_cast<size_t>(n) - 1])];
+        for (Index j = 2; j <= n - 1; ++j) {
+            longv += 2.0 * localradii[static_cast<size_t>(side[static_cast<size_t>(j) - 1])];
+        }
+        sidelengths[static_cast<size_t>(i)] = longv;
+        fullLength += longv;
+    }
+    Index halfn = numSides / 2;
+
+    if (numSides == 3) {
+        // triangle: solve triangle to set 'targetLength's
+        Scalar opp1 = vAims[static_cast<size_t>(corners[2])];
+        Scalar opp2 = vAims[static_cast<size_t>(corners[0])];
+        if (opp1 <= 0.0 || opp2 <= 0.0 || (opp1 + opp2) >= kPi) {
+            std::fprintf(stderr, "setPolyCenters: error in triangles angle aims\n");
+            return;
+        }
+        Scalar opp3 = kPi - (opp1 + opp2); // ensure angles sum to pi
+        // law of sines gives desired proportions of side lengths
+        targetLength[0] = 1.0;
+        targetLength[1] = std::sin(opp2) / std::sin(opp1);
+        targetLength[2] = std::sin(opp3) / std::sin(opp1);
+        Scalar lensum = targetLength[0] + targetLength[1] + targetLength[2];
+        Scalar factor = lensum / fullLength;
+        for (auto& r : localradii) r *= factor;
+        for (auto& s : sidelengths) s *= factor;
+    } else if (halfn * 2 == numSides) {
+        // polygon, n even: pair up opposite sides, target total length ~2*pi
+        Scalar factor = 6.0 / fullLength;
+        for (auto& r : localradii) r *= factor;
+        for (auto& s : sidelengths) s *= factor;
+        for (Index j = 1; j <= halfn; ++j) {
+            targetLength[static_cast<size_t>(j) - 1] =
+                (sidelengths[static_cast<size_t>(j) - 1] +
+                 sidelengths[static_cast<size_t>(halfn + j) - 1]) /
+                2.0;
+            targetLength[static_cast<size_t>(halfn + j) - 1] =
+                targetLength[static_cast<size_t>(j) - 1];
+        }
+    } else {
+        // polygon, n odd: sides target length 2*sin(pi/n) (regular n-gon in unit disc)
+        Scalar spn = 2.0 * std::sin(kPi / numSides);
+        Scalar factor = numSides * spn / fullLength;
+        for (auto& r : localradii) r *= factor;
+        for (auto& s : sidelengths) s *= factor;
+        for (Index j = 0; j < numSides; ++j) targetLength[static_cast<size_t>(j)] = spn;
+    }
+
+    // ------ Step 1: lay out using 'targetLength's.
+    //   num_sides odd: first corner at z=i, bisected by imaginary axis,
+    //     edge down to left.
+    //   num_sides even: first corner at 1+i, first edge horizontal to left.
+    std::vector<Scalar> edgeArg(static_cast<size_t>(numSides), 1.0);
+    edgeArg[0] = kPi;
+    if (halfn * 2 != numSides) { // odd?
+        edgeArg[0] = kPi + (kPi - vAims[static_cast<size_t>(corners[0])]) / 2.0;
+    }
+    for (Index j = 2; j <= numSides; ++j) {
+        edgeArg[static_cast<size_t>(j) - 1] =
+            edgeArg[static_cast<size_t>(j) - 2] + kPi -
+            vAims[static_cast<size_t>(corners[static_cast<size_t>(j) - 1])];
+    }
+    std::vector<Complex> edgedir(static_cast<size_t>(numSides), Complex(1.0, 0.0));
+    for (Index j = 0; j < numSides; ++j) {
+        edgedir[static_cast<size_t>(j)] = std::exp(Complex(0.0, edgeArg[static_cast<size_t>(j)]));
+    }
+
+    // Set first corner, then layout edges in turn; adjust sizes based on 'targetLength's.
+    localcenters[static_cast<size_t>(corners[0])] = Complex(0.0, 1.0); // at z=i
+    if (halfn * 2 == numSides) {                                      // even?
+        localcenters[static_cast<size_t>(corners[0])] = Complex(1.0, 1.0); // at z=1+i
+    }
+    for (Index k = 1; k <= numSides; ++k) {
+        Scalar sidefactor =
+            targetLength[static_cast<size_t>(k) - 1] / sidelengths[static_cast<size_t>(k) - 1];
+        const auto& side = sides[static_cast<size_t>(k) - 1];
+        Index n = static_cast<Index>(side.size());
+        Scalar prev = localradii[static_cast<size_t>(corners[static_cast<size_t>(k) - 1])];
+        Complex spot = localcenters[static_cast<size_t>(corners[static_cast<size_t>(k) - 1])];
+        localcenters[static_cast<size_t>(side[0])] = spot;
+        for (Index i = 1; i <= n - 1; ++i) {
+            Scalar next = localradii[static_cast<size_t>(side[static_cast<size_t>(i)])];
+            spot += sidefactor * edgedir[static_cast<size_t>(k) - 1] * (prev + next);
+            localcenters[static_cast<size_t>(side[static_cast<size_t>(i)])] = spot;
+            prev = next;
+        }
+    }
+
+    // Step 2: put average of corners at the origin.
+    Complex centAvg(0.0, 0.0);
+    for (Index j = 0; j < numSides; ++j) {
+        centAvg += localcenters[static_cast<size_t>(corners[static_cast<size_t>(j)])];
+    }
+    centAvg /= static_cast<Scalar>(numSides);
+    for (Index j = 1; j <= nodeCount; ++j) localcenters[static_cast<size_t>(j)] -= centAvg;
+
+    // Step 3: scale.
+    Scalar scalefactor;
+    if (halfn * 2 == numSides) { // even?
+        scalefactor = localcenters[static_cast<size_t>(corners[0])].real();
+    } else {
+        scalefactor = localcenters[static_cast<size_t>(corners[0])].imag();
+    }
+    for (auto& c : localcenters) c /= scalefactor;
+    for (auto& r : localradii) r /= scalefactor;
 }
 
 Scalar Packer::getAspect() {
-    throw NotImplementedError(
-        "Packer::getAspect: not yet ported (getAspect.m); only meaningful for "
-        "the not-yet-ported polygonal/rectangle packing mode.");
+    if (mode != 2 || corners.size() != 4) {
+        std::fprintf(stderr, "Aspect usage: should be mode 2 and have 4 corners\n");
+        return -1.0;
+    }
+    Scalar top = std::abs(localcenters[static_cast<size_t>(corners[1])] -
+                          localcenters[static_cast<size_t>(corners[0])]);
+    Scalar rend = std::abs(localcenters[static_cast<size_t>(corners[3])] -
+                           localcenters[static_cast<size_t>(corners[0])]);
+    Scalar lend = std::abs(localcenters[static_cast<size_t>(corners[2])] -
+                           localcenters[static_cast<size_t>(corners[1])]);
+    Scalar bot = std::abs(localcenters[static_cast<size_t>(corners[3])] -
+                          localcenters[static_cast<size_t>(corners[2])]);
+    return (top + bot) / (rend + lend);
 }
 
 void Packer::setHoroCenters() {
