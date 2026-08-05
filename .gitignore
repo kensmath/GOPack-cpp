@@ -2,6 +2,7 @@
 build/
 out/
 core/out/
+/packings
 
 # IDE local caches
 .vs/
