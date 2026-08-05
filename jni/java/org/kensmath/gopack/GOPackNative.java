@@ -13,7 +13,7 @@ package org.kensmath.gopack;
  * based on {@code os.name} / {@code os.arch} before calling loadLibrary).
  *
  * <p>Every native method below is a direct 1:1 mapping onto the C++ core API
- * in {@code core/include/gopack/MaximalPacker.h}; see that header for the
+ * in {@code core/include/gopack/Packer.h}; see that header for the
  * authoritative semantics. This class intentionally carries no packing logic
  * of its own -- it is a pure bridge.
  */
@@ -31,8 +31,11 @@ public final class GOPackNative {
      * maximal packing (mode 1: max pack in the disc/plane, or on the sphere
      * if the complex has no boundary).
      *
-     * <p>Only maximal-packing mode is ported so far; polygonal/rectangle
-     * modes are not yet available through this bridge.
+     * <p>This bridge method only exposes maximal-packing mode (mode 1).
+     * Polygonal/rectangle packing (mode 2) is ported in the C++ core
+     * ({@code Packer::setMode}/{@code setPolyCenters}/{@code setRectCenters})
+     * but not yet wired up to a JNI entry point -- the CLI's {@code
+     * --polygon} flag is the only way to reach it today.
      *
      * @param inputPath  path to a *.p triangulation/packing file
      * @param geometryHint reserved for future use (currently ignored --
@@ -42,10 +45,12 @@ public final class GOPackNative {
      *                     port uses GOPack's fixed 0.01 visual-error cutoff);
      *                     pass 0.0
      * @param maxPasses    upper bound on riffle passes (GOPack default is 20)
-     * @return euclidean radii for every vertex, 0-indexed (Java index i is
-     *         vertex i+1 in GOPack's 1-indexed numbering); throws
-     *         {@link GOPackException} if the native call fails or the file
-     *         cannot be read
+     * @return euclidean radii for every vertex, as an array of length
+     *         nodeCount+1 where index v holds vertex v's radius for
+     *         v = 1..nodeCount (matching GOPack/CirclePack's own 1-indexed
+     *         vertex numbering -- the same convention used throughout the
+     *         C++ core); index 0 is unused. Throws {@link GOPackException}
+     *         if the native call fails or the file cannot be read.
      */
     public static native double[] computeMaximalPacking(
             String inputPath, int geometryHint, double tolerance, int maxPasses)
