@@ -29,6 +29,15 @@
 // removal (pruneComplex), and random-triangulation generation are
 // understood (see the corresponding .m files) but not yet ported; calling
 // those methods throws NotImplementedError rather than guessing.
+//
+// INPUT: readpack() (the *.p FLOWERS format) is one way to get a complex
+// into a Packer; loadComplex() is the other -- it has no MATLAB counterpart,
+// and exists purely for embedding (JNI/library callers that already hold
+// the triangulation in memory, e.g. CirclePack's own per-vertex flower
+// data, and would otherwise have to serialize it to text just to have this
+// library immediately parse that text back out again). Both funnel into the
+// same ingestFlowers()/finalizeComplex() logic, so a complex loaded either
+// way behaves identically from that point on.
 #include <complex>
 #include <stdexcept>
 #include <string>
@@ -164,7 +173,10 @@ public:
     // C++ vector can't distinguish "omitted" from "explicitly empty" the
     // way MATLAB's nargin can, so an empty 'crns' here always means
     // "figure out the corners for me", the more useful default). 'angs' is
-    // an optional matching list of corner target angles.
+    // an optional matching list of corner target angles. NOTE: entering
+    // mode 2 always resets 'hes' to Euclidean (a deliberate deviation from
+    // GOPacker.m -- see the comment in setMode's .cpp definition), even if
+    // the packing was originally read as hyperbolic or spherical.
     int setMode(int mdIn, const std::vector<Index>& crns = {}, const std::vector<Scalar>& angs = {});
 
     // layoutCenters.m
@@ -200,6 +212,58 @@ public:
     // (parse_triangles.m) are NOT YET PORTED.
     Index readpack(const std::string& fname);
 
+    // loadComplex -- ingest an already-known combinatorial complex directly,
+    // without going through the *.p text format at all. This is the same
+    // logic readpack() uses after parsing (alpha resolution, complex_count,
+    // default radii/centers/vAims, indxMatrices), factored out so a caller
+    // that already holds the triangulation in memory -- e.g. a JNI caller
+    // passing CirclePack's own per-vertex flower data -- never has to
+    // serialize it to text and pay for readpack()'s parsing just to hand it
+    // straight back. Intended as the library entry point for JNI/embedding
+    // use; readpack() remains the entry point for CLI/file use and is
+    // implemented in terms of this same code path, so the two can never
+    // silently diverge in behavior.
+    //
+    // flowersIn: 1-indexed, size nodeCountIn+1 (index 0 unused/ignored).
+    // flowersIn[v] is v's petal list in the *.p FLOWERS format convention:
+    // CLOSED (front()==back()) iff v is an interior vertex, OPEN
+    // (front()!=back()) iff v is a boundary vertex. vNum/bdryFlags/bdryCount
+    // are derived from this, not taken as separate inputs, so they can never
+    // disagree with the flowers themselves.
+    // geometryIn: Euclidean/Hyperbolic/Spherical, matching the *.p file's
+    // GEOMETRY: line.
+    // alphaIn/gammaIn: pass 0 for "let GOPack pick" (matching an absent
+    // ALPHA/GAMMA: line); a negative alphaIn forces auto-search the way
+    // readpack()'s "alpha < 0" branch does. Most callers should just pass 0
+    // for both.
+    // initRadii/initCenters: optional (nullptr = omitted, matching an absent
+    // RADII:/CENTERS: section) starting circle data, sized nodeCountIn+1,
+    // 1-indexed. When omitted, defaults match readpack() (radii 0.5, centers
+    // 0). NOTE: mirrors readpack()'s own (slightly surprising) behavior of
+    // only applying initRadii/initCenters for Euclidean or Hyperbolic input
+    // -- Spherical input falls back to the defaults even if provided, same
+    // as reading a spherical *.p file with a RADII:/CENTERS: section.
+    // vlistIn: optional (nullptr = omitted) utility vertex list, matching
+    // the *.p file's VERT_LIST: section (used e.g. as a corner-selection
+    // hint by setMode's mode-2 branch).
+    // vAimsIn: optional (nullptr = omitted) target angle sums, matching the
+    // *.p file's ANGLE_AIMS: section; when omitted, defaults to the usual
+    // 2*pi interior / -1 boundary convention.
+    // label: optional display name for the "packing is loaded" console
+    // message (mirroring readpack()'s use of the file's base name); pass ""
+    // to suppress that message entirely, which most in-process callers will
+    // want.
+    //
+    // Returns nodeCount on success, 0 on error (same convention as
+    // readpack()).
+    Index loadComplex(Index nodeCountIn, const std::vector<std::vector<Index>>& flowersIn,
+                       Geometry geometryIn, Index alphaIn = 0, Index gammaIn = 0,
+                       const std::vector<Scalar>* initRadii = nullptr,
+                       const std::vector<Complex>* initCenters = nullptr,
+                       const std::vector<Index>* vlistIn = nullptr,
+                       const std::vector<Scalar>* vAimsIn = nullptr,
+                       const std::string& label = "");
+
     // parse_triangles.m -- NOT YET PORTED.
     Index parseTriangles();
 
@@ -218,6 +282,20 @@ public:
 
 private:
     std::vector<Scalar> angsumErrorsImpl(const std::vector<Scalar>* radiiOverride) const;
+
+    // Shared building blocks behind readpack()/loadComplex() -- see the
+    // .cpp for the full rationale. ingestFlowers populates
+    // flowers/vNum/bdryFlags/bdryCount/intCount/faceCount/edgeCount from a
+    // flowers list and resolves alpha (reading/writing the `alpha`/`gamma`
+    // members, which the caller must have already set to the desired
+    // starting value, 0 for "let GOPack pick"). finalizeComplex does
+    // everything readpack() does after that: complexCount(), default/given
+    // radii+centers, default/given vAims, indxMatrices(), and the optional
+    // console message.
+    Index ingestFlowers(Index nodeCountIn, const std::vector<std::vector<Index>>& flowersIn);
+    Index finalizeComplex(const std::vector<Scalar>* initRadii,
+                           const std::vector<Complex>* initCenters,
+                           const std::vector<Scalar>* vAimsIn, const std::string& label);
 };
 
 } // namespace gopack

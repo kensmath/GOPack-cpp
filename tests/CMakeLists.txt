@@ -10,3 +10,7 @@ add_test(NAME readpack_roundtrip COMMAND test_readpack_roundtrip
 add_executable(test_polygonal test_polygonal.cpp)
 target_link_libraries(test_polygonal PRIVATE gopack_core)
 add_test(NAME polygonal COMMAND test_polygonal)
+
+add_executable(test_loadcomplex test_loadcomplex.cpp)
+target_link_libraries(test_loadcomplex PRIVATE gopack_core)
+add_test(NAME loadcomplex COMMAND test_loadcomplex)

@@ -22,6 +22,15 @@ identical to the source).
 **Fully ported and covered by tests** (`gopack::Packer`):
 
 - `readpack` -- reads the `*.p` FLOWERS format (docs/GO_Formats.txt)
+- `loadComplex` -- **not part of the original MATLAB source**; a new entry
+  point that ingests an already-known combinatorial complex directly from
+  memory (nodeCount + per-vertex flower lists + geometry, matching the *.p
+  FLOWERS format's own fields but as arrays instead of parsed text), for
+  callers that already hold the triangulation in memory instead of a file
+  (e.g. the JNI bridge's `computeMaximalPackingFromComplex`, see "Java
+  usage" below). Implemented as the same post-parse logic readpack() itself
+  uses (factored out so the two can't silently diverge), so a complex loaded
+  either way behaves identically from that point on.
 - `complex_count`, `indxMatrices`, `FarVert`
 - **Mode 1 (maximal packing)** of the disc/plane, or the sphere if the
   complex has no boundary: `setMode` mode 1, `layoutBdry` / `setHoroCenters`
@@ -73,6 +82,15 @@ files), so porting them is a bounded follow-up, not new research.
   actual corner coordinates used in the same function (real part in
   `{+1,-1}`, imaginary part in `{+aspect,-aspect}`); ported literally as
   written, not as commented, with a note in the code.
+- `setMode(2, ...)` always resets `hes` to Euclidean, even if the packing
+  was originally read as hyperbolic or spherical -- `setMode.m` doesn't do
+  this. GOPack always computes internally in euclidean coordinates
+  regardless of `hes` (see `Geometry.h`); `hes` only controls whether
+  `readpack()`/`writepack()` convert to/from hyperbolic or spherical circle
+  data at the file boundary. A polygon/rectangle boundary is inherently a
+  euclidean shape, so leaving `hes` at its original (hyperbolic/spherical)
+  value would make `writepack()` apply a conversion to already-euclidean
+  polygon output that was never intended for it.
 
 ### One deliberate deviation from the literal source
 
@@ -86,13 +104,16 @@ knowingly differs from the literal source.
 
 ## What has -- and hasn't -- been verified
 
-- Three regression tests (`tests/test_hex_flower.cpp`,
-  `tests/test_readpack_roundtrip.cpp`, `tests/test_polygonal.cpp`) exercise
-  the pipeline on the classical "hex flower" complex (one interior vertex of
-  degree 6 ringed by 6 boundary vertices) in both modes, checking angle-sum
-  convergence and symmetric radii for mode 1, a read/riffle/write/re-read
-  round trip, and (for mode 2) that a 4-corner rectangle layout stays
-  finite, positive, and rectangle-shaped after riffling.
+- Four regression tests (`tests/test_hex_flower.cpp`,
+  `tests/test_readpack_roundtrip.cpp`, `tests/test_polygonal.cpp`,
+  `tests/test_loadcomplex.cpp`) exercise the pipeline on the classical "hex
+  flower" complex (one interior vertex of degree 6 ringed by 6 boundary
+  vertices) in both modes, checking angle-sum convergence and symmetric
+  radii for mode 1, a read/riffle/write/re-read round trip, that a 4-corner
+  rectangle layout (mode 2) stays finite, positive, and rectangle-shaped
+  after riffling, and that `loadComplex()` produces a packing that agrees
+  with a hand-built (readpack()-equivalent) `Packer` to within 1e-9 --
+  including its alpha-resolution and optional-radii/vAims-override paths.
 - **Mode 1 has been built and run successfully on real Windows hardware**,
   including on genuinely large inputs (up to ~500,000 vertices from
   `GOPack/data/lace500000_K.p`), producing packings that loaded correctly
@@ -162,19 +183,51 @@ CLI also prints the resulting aspect ratio (`getAspect`).
 
 ## Java usage
 
+Two ways to compute a maximal packing (mode 1) from Java, depending on
+whether your data starts out in a `*.p` file or already in memory:
+
 ```java
+// From a file:
 double[] radii = org.kensmath.gopack.GOPackNative.computeMaximalPacking(
     "input.p", /* geometryHint (reserved) */ 0, /* tolerance (reserved) */ 0.0,
     /* maxPasses */ 20);
+
+// From an in-memory complex (e.g. CirclePack's own per-vertex flower data):
+int[][] flowers = new int[nodeCount + 1][]; // flowers[0] unused
+// ... fill flowers[1..nodeCount], CLOSED (first==last) for interior
+//     vertices, OPEN (first!=last) for boundary vertices ...
+double[] radii2 = org.kensmath.gopack.GOPackNative.computeMaximalPackingFromComplex(
+    nodeCount, flowers, /* geometry: 0=eucl -1=hyp +1=sph */ 0,
+    /* tolerance (reserved) */ 0.0, /* maxPasses */ 20);
 ```
 
-`radii` has length `nodeCount+1`, and `radii[v]` is vertex `v`'s euclidean
-radius for `v = 1..nodeCount` -- matching GOPack/CirclePack's own 1-indexed
-vertex numbering (the same convention used throughout the C++ core), rather
-than shifting to a "natural" 0-indexed Java array. `radii[0]` is unused.
-Load `gopack_jni.dll` / `libgopack_jni.dylib` via `java.library.path`, or
-bundle both platform binaries and pick one at runtime based on
-`os.name`/`os.arch` (see the class doc comment in `GOPackNative.java`).
+`radii`/`radii2` both have length `nodeCount+1`, and `radii[v]` is vertex
+`v`'s euclidean radius for `v = 1..nodeCount` -- matching GOPack/CirclePack's
+own 1-indexed vertex numbering (the same convention used throughout the C++
+core), rather than shifting to a "natural" 0-indexed Java array. `radii[0]`
+is unused. Load `gopack_jni.dll` / `libgopack_jni.dylib` via
+`java.library.path`, or bundle both platform binaries and pick one at
+runtime based on `os.name`/`os.arch` (see the class doc comment in
+`GOPackNative.java`).
+
+**Prefer `computeMaximalPackingFromComplex` over `computeMaximalPacking`
+whenever the triangulation already exists in memory on the Java side** (as
+it will for a CirclePack caller). `computeMaximalPacking` still has to open
+and parse a `*.p` file on the C++ side (`Packer::readpack`), which for large
+complexes can easily take longer than the packing computation itself --
+that text parsing is real work regardless of whether it happens in a
+subprocess or in-process. `computeMaximalPackingFromComplex` goes straight
+to `Packer::loadComplex` (`core/src/PackerIO.cpp`), skipping both the
+Java-side serialization to text and the C++-side parsing back out of it, so
+its cost is close to the packing computation alone. `computeMaximalPacking`
+remains the right choice when the data genuinely starts out as a file (a
+`*.p` on disk with no in-memory representation yet).
+
 Only mode 1 (maximal packing) is exposed through this JNI bridge so far;
-mode 2 (polygonal/rectangle) is ported in the C++ core but only reachable
-today via the CLI's `--polygon` flag.
+mode 2 (polygonal/rectangle) is ported in the C++ core (both `readpack()`
+and `loadComplex()` load a complex the same way regardless of which mode you
+later select with `setMode`) but only reachable today via the CLI's
+`--polygon` flag -- adding `computeMaximalPackingFromComplex`'s mode-2
+counterpart is a small follow-up whenever you need it (same `loadComplex`
+plumbing, just `setMode(2, corners, angles)` instead of `setMode(1)` before
+`riffle`).

@@ -56,6 +56,42 @@ public final class GOPackNative {
             String inputPath, int geometryHint, double tolerance, int maxPasses)
             throws GOPackException;
 
+    /**
+     * The in-memory counterpart to {@link #computeMaximalPacking}: computes a
+     * maximal packing (mode 1) directly from a triangulation already held in
+     * memory -- e.g. CirclePack's own per-vertex neighbor ("flower") data --
+     * instead of a *.p file path. Skips both the file write a caller would
+     * otherwise need to serialize its in-memory complex to text, and the
+     * native side's own text parsing (readpack()) to read it back; for large
+     * complexes that parsing step can dominate the actual packing
+     * computation, which is the whole reason this entry point exists. See
+     * {@code gopack::Packer::loadComplex} in {@code core/src/PackerIO.cpp}
+     * for the full semantics this mirrors.
+     *
+     * @param nodeCount number of vertices in the complex
+     * @param flowers   length {@code nodeCount+1}, 1-indexed ({@code
+     *                  flowers[0]} is ignored/unused). {@code flowers[v]} is
+     *                  vertex v's petal list, in the same convention as the
+     *                  *.p FLOWERS format: CLOSED (first element == last
+     *                  element) iff v is an interior vertex, OPEN (first !=
+     *                  last) iff v is a boundary vertex.
+     * @param geometry  0 = Euclidean, -1 = Hyperbolic, +1 = Spherical
+     *                  (matches the *.p file's GEOMETRY: field and the C++
+     *                  core's {@code gopack::Geometry} enum values directly)
+     * @param tolerance reserved for future use (currently ignored -- the
+     *                  port uses GOPack's fixed 0.01 visual-error cutoff);
+     *                  pass 0.0
+     * @param maxPasses upper bound on riffle passes (GOPack default is 20)
+     * @return euclidean radii for every vertex, in the same {@code
+     *         nodeCount+1}-length, 1-indexed convention as {@link
+     *         #computeMaximalPacking}. Throws {@link GOPackException} if the
+     *         native call fails (e.g. a malformed complex -- wrong array
+     *         lengths, no interior vertex, etc.).
+     */
+    public static native double[] computeMaximalPackingFromComplex(
+            int nodeCount, int[][] flowers, int geometry, double tolerance, int maxPasses)
+            throws GOPackException;
+
     /** Returns the linked native library's version string, for diagnostics. */
     public static native String nativeVersion();
 }

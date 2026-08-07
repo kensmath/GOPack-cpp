@@ -135,14 +135,10 @@ Index Packer::readpack(const std::string& fname) {
             }
             if (nodeCase == 1) hes = static_cast<Geometry>(geomFlag);
         } else if ((startsWith(tok, "FLOW") || startsWith(tok, "BOUQ")) && nodeCase == 1) {
-            flowers.assign(static_cast<size_t>(nodeCount) + 1, {});
-            vNum.assign(static_cast<size_t>(nodeCount) + 1, 0);
-            bdryFlags.assign(static_cast<size_t>(nodeCount) + 1, 0);
-            bdryCount = 0;
-
             std::string restOfLine;
             std::getline(in, restOfLine); // consume rest of "FLOWERS:" line
 
+            std::vector<std::vector<Index>> parsedFlowers(static_cast<size_t>(nodeCount) + 1);
             for (Index j = 1; j <= nodeCount; ++j) {
                 std::string line;
                 while (std::getline(in, line)) {
@@ -163,48 +159,24 @@ Index Packer::readpack(const std::string& fname) {
                                  "Packer::readpack: malformed FLOWERS line for vertex %d\n", j);
                     return 0;
                 }
-                Index m = static_cast<Index>(nums[1]); // vNum
-                vNum[j] = m;
+                // nums[1] is the file's own declared petal count; from here
+                // on only the flower list itself (nums[2..end]) is kept, and
+                // ingestFlowers() derives vNum as flower.size()-1. For any
+                // well-formed *.p file the two always agree (that's what
+                // "well-formed" means here), so this isn't a behavior change
+                // in practice -- it just avoids readpack() and the new
+                // in-memory loadComplex() entry point needing two different
+                // notions of vNum.
                 std::vector<Index> flower;
-                flower.reserve(static_cast<size_t>(m) + 1);
+                flower.reserve(nums.size() - 2);
                 for (size_t idx = 2; idx < nums.size(); ++idx) {
                     flower.push_back(static_cast<Index>(nums[idx]));
                 }
-                if (flower.front() != flower.back()) { // bdry vertex
-                    bdryFlags[j] = 1;
-                    bdryCount++;
-                }
-                flowers[j] = std::move(flower);
+                parsedFlowers[static_cast<size_t>(j)] = std::move(flower);
             }
 
-            intCount = nodeCount - bdryCount;
-            Index totvNum = 0;
-            for (Index v = 1; v <= nodeCount; ++v) totvNum += vNum[v];
-            faceCount = totvNum / 3;
-            edgeCount = (totvNum + bdryCount) / 2;
-
-            if (alpha == 0 || (alpha >= 1 && alpha <= nodeCount && bdryFlags[alpha] != 0)) {
-                Index candidate = 0;
-                for (Index v = 1; v <= nodeCount; ++v) {
-                    if (bdryFlags[v] == 0) { candidate = -v; break; }
-                }
-                alpha = candidate;
-            }
-
-            if (alpha == 0) {
-                std::fprintf(stderr, "Error, no interior vertex was found, stop processing.\n");
+            if (ingestFlowers(nodeCount, parsedFlowers) == 0) {
                 return 0;
-            } else if (alpha < 0) {
-                if (bdryCount == 0) {
-                    alpha = 1;
-                } else {
-                    std::vector<Index> seeds;
-                    for (Index j = 1; j <= nodeCount; ++j) {
-                        if (bdryFlags[j] == 1) seeds.push_back(j);
-                    }
-                    Index a = farVert(seeds);
-                    alpha = (a < 0) ? 1 : a;
-                }
             }
         } else if (startsWith(tok, "RADI")) { // RADII:
             newRadii.assign(static_cast<size_t>(nodeCount) + 1, 0.0);
@@ -230,24 +202,124 @@ Index Packer::readpack(const std::string& fname) {
     }
 
     if (nodeCase == 1) {
-        complexCount();
-        if (orphanCount > 0) {
-            std::fprintf(stderr,
-                         "Warning: orphan vertices were found (vertices w/o interior "
-                         "neighbors)\n");
+        // Fresh load (as opposed to a CHECKCOUNT: update to an
+        // already-loaded packing, handled in the else branch below): this is
+        // exactly what the new loadComplex() entry point also needs to do
+        // once it has a complex in hand, so it's factored out into
+        // finalizeComplex() and shared rather than duplicated.
+        const std::vector<Scalar>* radiiPtr = haveNewRadii ? &newRadii : nullptr;
+        const std::vector<Complex>* centersPtr = haveNewCenters ? &newCenters : nullptr;
+        if (finalizeComplex(radiiPtr, centersPtr, nullptr, fileName) == 0) {
+            return 0;
         }
-        centers.assign(static_cast<size_t>(nodeCount) + 1, Complex(0.0, 0.0));
-        radii.assign(static_cast<size_t>(nodeCount) + 1, 0.5);
-        if (haveNewRadii) origRadii = newRadii;
-        if (haveNewCenters) origCenters = newCenters;
+    } else {
+        // CHECKCOUNT-type file: update radii/centers on the already-loaded
+        // packing in place, without touching combinatorics/alpha/vAims (that
+        // state belongs to the packing that was already loaded by an
+        // earlier readpack()/loadComplex() call).
+        if (geomFlag == 0 && haveNewRadii) radii = newRadii;
+        if (geomFlag == 0 && haveNewCenters) centers = newCenters;
+        if (geomFlag < 0 && haveNewRadii && haveNewCenters) {
+            for (Index v = 1; v <= nodeCount; ++v) {
+                auto [ez, er] = geom::hToEData(newCenters[v], newRadii[v]);
+                radii[v] = er;
+                centers[v] = ez;
+            }
+        }
+        localcenters = centers;
+        localradii = radii;
+        mode = 1;
+        indxMatrices();
     }
 
-    if (geomFlag == 0 && haveNewRadii) radii = newRadii;
-    if (geomFlag == 0 && haveNewCenters) centers = newCenters;
+    return nodeCount;
+}
 
-    if (geomFlag < 0 && haveNewRadii && haveNewCenters) {
+Index Packer::ingestFlowers(Index nodeCountIn, const std::vector<std::vector<Index>>& flowersIn) {
+    nodeCount = nodeCountIn;
+    flowers.assign(static_cast<size_t>(nodeCount) + 1, {});
+    vNum.assign(static_cast<size_t>(nodeCount) + 1, 0);
+    bdryFlags.assign(static_cast<size_t>(nodeCount) + 1, 0);
+    bdryCount = 0;
+
+    for (Index j = 1; j <= nodeCount; ++j) {
+        const std::vector<Index>& flower = flowersIn[static_cast<size_t>(j)];
+        if (flower.size() < 2) {
+            std::fprintf(stderr,
+                         "Packer::ingestFlowers: flower for vertex %d has fewer than 2 "
+                         "entries (need at least a single petal, closed or open)\n", j);
+            return 0;
+        }
+        vNum[j] = static_cast<Index>(flower.size()) - 1;
+        if (flower.front() != flower.back()) { // bdry vertex
+            bdryFlags[j] = 1;
+            bdryCount++;
+        }
+        flowers[j] = flower;
+    }
+
+    intCount = nodeCount - bdryCount;
+    Index totvNum = 0;
+    for (Index v = 1; v <= nodeCount; ++v) totvNum += vNum[v];
+    faceCount = totvNum / 3;
+    edgeCount = (totvNum + bdryCount) / 2;
+
+    // alpha resolution -- identical logic to readpack.m's, now shared by
+    // both readpack() (which reaches here via the FLOWERS:/BOUQUET: branch
+    // above) and loadComplex().
+    if (alpha == 0 || (alpha >= 1 && alpha <= nodeCount && bdryFlags[alpha] != 0)) {
+        Index candidate = 0;
         for (Index v = 1; v <= nodeCount; ++v) {
-            auto [ez, er] = geom::hToEData(newCenters[v], newRadii[v]);
+            if (bdryFlags[v] == 0) { candidate = -v; break; }
+        }
+        alpha = candidate;
+    }
+
+    if (alpha == 0) {
+        std::fprintf(stderr, "Error, no interior vertex was found, stop processing.\n");
+        return 0;
+    } else if (alpha < 0) {
+        if (bdryCount == 0) {
+            alpha = 1;
+        } else {
+            std::vector<Index> seeds;
+            for (Index j = 1; j <= nodeCount; ++j) {
+                if (bdryFlags[j] == 1) seeds.push_back(j);
+            }
+            Index a = farVert(seeds);
+            alpha = (a < 0) ? 1 : a;
+        }
+    }
+
+    return nodeCount;
+}
+
+Index Packer::finalizeComplex(const std::vector<Scalar>* initRadii,
+                               const std::vector<Complex>* initCenters,
+                               const std::vector<Scalar>* vAimsIn, const std::string& label) {
+    complexCount();
+    if (orphanCount > 0) {
+        std::fprintf(stderr,
+                     "Warning: orphan vertices were found (vertices w/o interior "
+                     "neighbors)\n");
+    }
+    centers.assign(static_cast<size_t>(nodeCount) + 1, Complex(0.0, 0.0));
+    radii.assign(static_cast<size_t>(nodeCount) + 1, 0.5);
+    if (initRadii) origRadii = *initRadii;
+    if (initCenters) origCenters = *initCenters;
+
+    // Mirrors readpack()'s own geometry-dependent handling exactly: given
+    // radii/centers are applied directly for Euclidean input, converted via
+    // hToEData for Hyperbolic input (needs both radii AND centers to
+    // convert), and -- matching the original behavior, not an oversight --
+    // simply NOT applied for Spherical input, which falls back to the
+    // defaults above even when radii/centers are given.
+    if (hes == Geometry::Euclidean) {
+        if (initRadii) radii = *initRadii;
+        if (initCenters) centers = *initCenters;
+    } else if (hes == Geometry::Hyperbolic && initRadii && initCenters) {
+        for (Index v = 1; v <= nodeCount; ++v) {
+            auto [ez, er] = geom::hToEData((*initCenters)[v], (*initRadii)[v]);
             radii[v] = er;
             centers[v] = ez;
         }
@@ -256,7 +328,9 @@ Index Packer::readpack(const std::string& fname) {
     localcenters = centers;
     localradii = radii;
 
-    if (vAims.empty()) {
+    if (vAimsIn) {
+        vAims = *vAimsIn;
+    } else if (vAims.empty()) {
         vAims.assign(static_cast<size_t>(nodeCount) + 1, kTwoPi);
         for (Index k = 1; k <= nodeCount; ++k) {
             if (bdryFlags[k] != 0) vAims[k] = -1.0;
@@ -266,12 +340,49 @@ Index Packer::readpack(const std::string& fname) {
     mode = 1;
     indxMatrices();
 
-    const char* gem = "Euclidean";
-    if (hes == Geometry::Hyperbolic) gem = "Hyperbolic";
-    else if (hes == Geometry::Spherical) gem = "Spherical";
-    std::fprintf(stdout, "Packing %s (%s) is loaded, max pack mode\n", fileName.c_str(), gem);
+    if (!label.empty()) {
+        const char* gem = "Euclidean";
+        if (hes == Geometry::Hyperbolic) gem = "Hyperbolic";
+        else if (hes == Geometry::Spherical) gem = "Spherical";
+        std::fprintf(stdout, "Packing %s (%s) is loaded, max pack mode\n", label.c_str(), gem);
+    }
 
     return nodeCount;
+}
+
+Index Packer::loadComplex(Index nodeCountIn, const std::vector<std::vector<Index>>& flowersIn,
+                           Geometry geometryIn, Index alphaIn, Index gammaIn,
+                           const std::vector<Scalar>* initRadii,
+                           const std::vector<Complex>* initCenters,
+                           const std::vector<Index>* vlistIn,
+                           const std::vector<Scalar>* vAimsIn, const std::string& label) {
+    if (nodeCountIn <= 0) {
+        std::fprintf(stderr, "Packer::loadComplex: nodeCountIn must be positive (got %d)\n",
+                     nodeCountIn);
+        return 0;
+    }
+    if (flowersIn.size() != static_cast<size_t>(nodeCountIn) + 1) {
+        std::fprintf(stderr,
+                     "Packer::loadComplex: flowersIn.size() must be nodeCountIn+1 "
+                     "(index 0 unused) -- got %zu, expected %d\n", flowersIn.size(),
+                     nodeCountIn + 1);
+        return 0;
+    }
+
+    cleanse(); // resets alpha/gamma/hes/vAims/vlist/etc. to defaults; must
+               // run before we set the fields below, or it would clobber them.
+    hes = geometryIn;
+    alpha = alphaIn;
+    gamma = gammaIn;
+    fileName = label.empty() ? "noname" : label;
+
+    if (ingestFlowers(nodeCountIn, flowersIn) == 0) {
+        return 0;
+    }
+
+    if (vlistIn) vlist = *vlistIn;
+
+    return finalizeComplex(initRadii, initCenters, vAimsIn, label);
 }
 
 Index Packer::parseTriangles() {

@@ -47,6 +47,22 @@ int Packer::setMode(int mdIn, const std::vector<Index>& crns, const std::vector<
 
     // ---- m == 2: polygonal packing ----
 
+    // Deliberate deviation from GOPacker.m: force euclidean geometry for
+    // polygonal/rectangle mode, even if the packing was originally read as
+    // hyperbolic or spherical. GOPack always computes internally in
+    // euclidean coordinates regardless of 'hes' (see the module comment in
+    // Geometry.h) -- 'hes' only controls whether readpack()/writepack()
+    // convert to/from hyperbolic or spherical circle data at the file
+    // boundary. A polygon/rectangle boundary is inherently a euclidean
+    // shape (straight sides, corner angles measured in the plane), so
+    // re-interpreting its output as hyperbolic or spherical on write
+    // wouldn't produce a meaningful hyperbolic/spherical polygon -- it
+    // would just silently warp already-euclidean coordinates through a
+    // conversion that was never intended for them. Setting hes here means
+    // writepack() leaves the (already-euclidean) radii/centers alone
+    // instead of applying that conversion.
+    hes = Geometry::Euclidean;
+
     // GOPacker.m's `obj.vAims(v)=val` assignments below auto-grow MATLAB's
     // array if it's currently shorter than `v` -- std::vector::operator[]
     // has no such safety net, so writing to an under-sized vAims here is

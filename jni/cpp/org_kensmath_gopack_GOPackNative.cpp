@@ -87,6 +87,94 @@ Java_org_kensmath_gopack_GOPackNative_computeMaximalPacking(
     }
 }
 
+// double[] computeMaximalPackingFromComplex(int nodeCount, int[][] flowers,
+// int geometry, double tolerance, int maxPasses)
+//
+// The in-memory counterpart to computeMaximalPacking above: takes a
+// triangulation already held in memory by the caller (e.g. CirclePack's own
+// per-vertex flower data) instead of a file path, so the combinatorics never
+// have to round-trip through the *.p text format just to be handed straight
+// back to this native call. This is the entry point Packer::loadComplex()
+// (core/src/PackerIO.cpp) exists for; see that method's doc comment for the
+// full semantics.
+//
+// flowers: length nodeCount+1, 1-indexed (flowers[0] is ignored/unused).
+// flowers[v] is v's petal list in the *.p FLOWERS format convention: CLOSED
+// (first element == last element) iff v is an interior vertex, OPEN
+// (first != last) iff v is a boundary vertex.
+// geometry: 0 = Euclidean, -1 = Hyperbolic, +1 = Spherical (matches
+// gopack::Geometry's own underlying values, and GOPack's GEOMETRY: file
+// field).
+// Returns radii in the same nodeCount+1-length, 1-indexed convention as
+// computeMaximalPacking.
+JNIEXPORT jdoubleArray JNICALL
+Java_org_kensmath_gopack_GOPackNative_computeMaximalPackingFromComplex(
+    JNIEnv* env, jclass /*clazz*/, jint nodeCount, jobjectArray flowers, jint geometry,
+    jdouble /*tolerance*/, jint maxPasses) {
+
+    try {
+        if (nodeCount <= 0) {
+            throwGOPackException(env, "GOPack native: nodeCount must be positive");
+            return nullptr;
+        }
+        const jsize expectedLen = static_cast<jsize>(nodeCount) + 1;
+        if (env->GetArrayLength(flowers) != expectedLen) {
+            throwGOPackException(env,
+                "GOPack native: flowers.length must be nodeCount+1 (index 0 unused)");
+            return nullptr;
+        }
+
+        std::vector<std::vector<gopack::Index>> flowersIn(static_cast<size_t>(expectedLen));
+        for (jsize v = 1; v < expectedLen; ++v) {
+            jobject rowObj = env->GetObjectArrayElement(flowers, v);
+            if (rowObj == nullptr) {
+                throwGOPackException(env,
+                    "GOPack native: flowers[v] must not be null for v=1..nodeCount");
+                return nullptr;
+            }
+            jintArray row = static_cast<jintArray>(rowObj);
+            jsize rowLen = env->GetArrayLength(row);
+            jint* rowData = env->GetIntArrayElements(row, nullptr);
+            std::vector<gopack::Index> flower(rowData, rowData + rowLen);
+            env->ReleaseIntArrayElements(row, rowData, JNI_ABORT);
+            env->DeleteLocalRef(rowObj);
+            flowersIn[static_cast<size_t>(v)] = std::move(flower);
+        }
+
+        gopack::Packer packer;
+        gopack::Index loaded = packer.loadComplex(static_cast<gopack::Index>(nodeCount),
+                                                    flowersIn,
+                                                    static_cast<gopack::Geometry>(geometry));
+        if (loaded <= 0) {
+            throwGOPackException(env,
+                "GOPack native: loadComplex failed (invalid/malformed complex -- see stderr)");
+            return nullptr;
+        }
+        if (packer.setMode(1) < 0) {
+            throwGOPackException(env, "GOPack native: failed to set max-pack mode");
+            return nullptr;
+        }
+
+        gopack::RiffleResult result = packer.riffle(maxPasses > 0 ? maxPasses : 20);
+        if (result.cycles < 0) {
+            throwGOPackException(env, "GOPack native: riffle failed");
+            return nullptr;
+        }
+
+        const jsize n = static_cast<jsize>(packer.nodeCount) + 1;
+        jdoubleArray out = env->NewDoubleArray(n);
+        if (out == nullptr) {
+            throwGOPackException(env, "Failed to allocate result array");
+            return nullptr;
+        }
+        env->SetDoubleArrayRegion(out, 0, n, packer.radii.data());
+        return out;
+    } catch (const std::exception& e) {
+        throwGOPackException(env, e.what());
+        return nullptr;
+    }
+}
+
 JNIEXPORT jstring JNICALL
 Java_org_kensmath_gopack_GOPackNative_nativeVersion(JNIEnv* env, jclass /*clazz*/) {
     return env->NewStringUTF(
