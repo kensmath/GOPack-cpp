@@ -37,6 +37,9 @@ public final class GOPackNative {
      * but not yet wired up to a JNI entry point -- the CLI's {@code
      * --polygon} flag is the only way to reach it today.
      *
+     * <p>Radii only (no centers) -- see {@link #computeMaximalPackingFromComplex}
+     * for the in-memory counterpart, which returns both.
+     *
      * @param inputPath  path to a *.p triangulation/packing file
      * @param geometryHint reserved for future use (currently ignored --
      *                     geometry is read from the file's GEOMETRY: field);
@@ -82,13 +85,29 @@ public final class GOPackNative {
      *                  port uses GOPack's fixed 0.01 visual-error cutoff);
      *                  pass 0.0
      * @param maxPasses upper bound on riffle passes (GOPack default is 20)
-     * @return euclidean radii for every vertex, in the same {@code
-     *         nodeCount+1}-length, 1-indexed convention as {@link
-     *         #computeMaximalPacking}. Throws {@link GOPackException} if the
-     *         native call fails (e.g. a malformed complex -- wrong array
-     *         lengths, no interior vertex, etc.).
+     * @return a 3-row {@code double[][]}, each row of length {@code
+     *         nodeCount+1} (1-indexed, index 0 unused), matching {@link
+     *         #computeMaximalPacking}'s indexing convention:
+     *         <ul>
+     *           <li>{@code result[0]} -- radii</li>
+     *           <li>{@code result[1]} -- center real parts</li>
+     *           <li>{@code result[2]} -- center imaginary parts</li>
+     *         </ul>
+     *         Unlike {@link #computeMaximalPacking}, this returns centers as
+     *         well as radii, since GOPack computes both together as part of
+     *         producing a valid packing. These are GOPack's internal working
+     *         values: per {@code core/include/gopack/Packer.h}, GOPack always
+     *         computes in euclidean coordinates regardless of {@code
+     *         geometry} -- no hyperbolic/spherical conversion (the
+     *         {@code eToHData}/{@code eToSData} logic in {@code writepack()})
+     *         is applied before these are returned. A caller reading back a
+     *         hyperbolic or spherical packing is responsible for applying
+     *         whatever conversion its own geometry model requires. Throws
+     *         {@link GOPackException} if the native call fails (e.g. a
+     *         malformed complex -- wrong array lengths, no interior vertex,
+     *         etc.).
      */
-    public static native double[] computeMaximalPackingFromComplex(
+    public static native double[][] computeMaximalPackingFromComplex(
             int nodeCount, int[][] flowers, int geometry, double tolerance, int maxPasses)
             throws GOPackException;
 

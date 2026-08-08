@@ -6,6 +6,7 @@
 #include <jni.h>
 
 #include <string>
+#include <vector>
 
 #include "gopack/Packer.h"
 
@@ -45,6 +46,10 @@ extern "C" {
 // eventual configurable stopping criterion, but the current port uses
 // GOPack's fixed 0.01 visual-error cutoff (continueRiffle.m's 'cutval'); a
 // future pass can thread a real tolerance through once that's wired up.
+//
+// This entry point is radii-only (no centers). See
+// computeMaximalPackingFromComplex below for the in-memory counterpart,
+// which returns both.
 JNIEXPORT jdoubleArray JNICALL
 Java_org_kensmath_gopack_GOPackNative_computeMaximalPacking(
     JNIEnv* env, jclass /*clazz*/, jstring inputPath, jint /*geometryHint*/,
@@ -87,7 +92,7 @@ Java_org_kensmath_gopack_GOPackNative_computeMaximalPacking(
     }
 }
 
-// double[] computeMaximalPackingFromComplex(int nodeCount, int[][] flowers,
+// double[][] computeMaximalPackingFromComplex(int nodeCount, int[][] flowers,
 // int geometry, double tolerance, int maxPasses)
 //
 // The in-memory counterpart to computeMaximalPacking above: takes a
@@ -105,9 +110,24 @@ Java_org_kensmath_gopack_GOPackNative_computeMaximalPacking(
 // geometry: 0 = Euclidean, -1 = Hyperbolic, +1 = Spherical (matches
 // gopack::Geometry's own underlying values, and GOPack's GEOMETRY: file
 // field).
-// Returns radii in the same nodeCount+1-length, 1-indexed convention as
-// computeMaximalPacking.
-JNIEXPORT jdoubleArray JNICALL
+//
+// Returns a 3-row double[][], each row of length nodeCount+1 (1-indexed,
+// index 0 unused), in the same convention as computeMaximalPacking's radii:
+//   result[0] -- radii
+//   result[1] -- center real parts
+//   result[2] -- center imaginary parts
+// Unlike computeMaximalPacking, this entry point returns centers as well as
+// radii, since GOPack computes both together (riffle() populates
+// packer.centers via reapResults() as part of producing a valid packing --
+// there's no extra computation here, only marshalling). These are GOPack's
+// internal working values: per the module comment in Packer.h, GOPack
+// always computes in euclidean coordinates regardless of 'geometry' --
+// 'geometry' is not applied to convert radii/centers to a hyperbolic or
+// spherical model here (that conversion, geom::eToHData/eToSData, only
+// happens in writepack() on the C++ side, which this bridge does not call).
+// A caller reading back a hyperbolic or spherical packing is responsible
+// for applying whatever conversion its own geometry model requires.
+JNIEXPORT jobjectArray JNICALL
 Java_org_kensmath_gopack_GOPackNative_computeMaximalPackingFromComplex(
     JNIEnv* env, jclass /*clazz*/, jint nodeCount, jobjectArray flowers, jint geometry,
     jdouble /*tolerance*/, jint maxPasses) {
@@ -161,13 +181,45 @@ Java_org_kensmath_gopack_GOPackNative_computeMaximalPackingFromComplex(
             return nullptr;
         }
 
+        // packer.centers is already populated here -- riffle() calls
+        // reapResults() internally (centers = localcenters; radii =
+        // localradii;) -- so this is pure marshalling, no extra computation.
         const jsize n = static_cast<jsize>(packer.nodeCount) + 1;
-        jdoubleArray out = env->NewDoubleArray(n);
+
+        std::vector<jdouble> centerX(static_cast<size_t>(n));
+        std::vector<jdouble> centerY(static_cast<size_t>(n));
+        for (jsize v = 0; v < n; ++v) {
+            const gopack::Complex& c = packer.centers[static_cast<size_t>(v)];
+            centerX[static_cast<size_t>(v)] = c.real();
+            centerY[static_cast<size_t>(v)] = c.imag();
+        }
+
+        jclass doubleArrayClass = env->FindClass("[D");
+        if (doubleArrayClass == nullptr) {
+            throwGOPackException(env, "Failed to find double[] class");
+            return nullptr;
+        }
+        jobjectArray out = env->NewObjectArray(3, doubleArrayClass, nullptr);
         if (out == nullptr) {
             throwGOPackException(env, "Failed to allocate result array");
             return nullptr;
         }
-        env->SetDoubleArrayRegion(out, 0, n, packer.radii.data());
+
+        jdoubleArray radiiOut = env->NewDoubleArray(n);
+        jdoubleArray centerXOut = env->NewDoubleArray(n);
+        jdoubleArray centerYOut = env->NewDoubleArray(n);
+        if (radiiOut == nullptr || centerXOut == nullptr || centerYOut == nullptr) {
+            throwGOPackException(env, "Failed to allocate result row array");
+            return nullptr;
+        }
+        env->SetDoubleArrayRegion(radiiOut, 0, n, packer.radii.data());
+        env->SetDoubleArrayRegion(centerXOut, 0, n, centerX.data());
+        env->SetDoubleArrayRegion(centerYOut, 0, n, centerY.data());
+
+        env->SetObjectArrayElement(out, 0, radiiOut);
+        env->SetObjectArrayElement(out, 1, centerXOut);
+        env->SetObjectArrayElement(out, 2, centerYOut);
+
         return out;
     } catch (const std::exception& e) {
         throwGOPackException(env, e.what());
