@@ -92,16 +92,6 @@ files), so porting them is a bounded follow-up, not new research.
   value would make `writepack()` apply a conversion to already-euclidean
   polygon output that was never intended for it.
 
-### One deliberate deviation from the literal source
-
-`code/s_to_e_data.m` calls a function `proj_vec_to_sph` that does not exist
-anywhere in the repository -- it's a typo for `proj_vec_to_s.m`. The C++
-port (`geom::sToEData` in `core/src/Geometry.cpp`) calls the real function,
-since that's unambiguously the intent; reproducing the bug would mean this
-one rarely-hit code path (spherical circles enclosing the point at infinity)
-throws in MATLAB and silently "works" here. This is the only place the port
-knowingly differs from the literal source.
-
 ## What has -- and hasn't -- been verified
 
 - Four regression tests (`tests/test_hex_flower.cpp`,
