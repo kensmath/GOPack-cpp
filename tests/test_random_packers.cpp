@@ -62,15 +62,33 @@ int main() {
     }
 
     // ==== randomSphere: spherical maximal packing (closed surface, no
-    // boundary). Every generated point lies exactly on the unit sphere, so
-    // (unlike a planar convex hull) none can end up "inside" the hull of the
-    // others -- every one of them should appear as a hull vertex, hence in
-    // the final complex. ====
+    // *combinatorial* boundary). Every generated point lies exactly on the
+    // unit sphere, so (unlike a planar convex hull) none can end up "inside"
+    // the hull of the others -- every one of them should appear as a hull
+    // vertex, hence in the final complex (checked via nodeCount below, and
+    // via Euler's formula externally: F = 2V-4 for a closed triangulated
+    // sphere).
+    //
+    // bdryCount == 3, NOT 0, for a valid spherical Packer: complexCount()'s
+    // "spherical case" branch (PackerCore.cpp, faithfully matching
+    // complex_count.m's own 'obj.bdryList=[a,b,c,a];') always manufactures a
+    // 3-vertex anchor loop for a closed complex -- there's no real
+    // combinatorial boundary (bdryFlags is all-zero here, which IS the
+    // "closed surface" property), but the layout solver still needs 3 pinned
+    // vertices to fix the packing's position/orientation on the sphere, so
+    // bdryList/bdryCount reflect that fixed 3-vertex bookkeeping loop rather
+    // than "no boundary at all". This is deterministic (same for every N),
+    // not something that depends on how many points are generated -- an
+    // earlier version of this test asserted bdryCount==0 here, which is
+    // simply incorrect for any spherical Packer, faithfully-ported or not. ====
     {
         Packer gop = Packer::randomSphere(150);
         checkTrue(gop.nodeCount == 150, "randomSphere(150) should use all 150 points");
         checkTrue(gop.hes == Geometry::Spherical, "randomSphere should tag hes as Spherical");
-        checkTrue(gop.bdryCount == 0, "randomSphere should have no boundary (closed surface)");
+        checkTrue(gop.bdryCount == 3,
+                  "randomSphere's complexCount() should produce the standard 3-vertex anchor "
+                  "loop for a closed/spherical complex (see complex_count.m's 'spherical case' "
+                  "branch)");
         gopack::RiffleResult rr = gop.riffle(100);
         checkTrue(rr.cycles >= 0, "randomSphere riffle should not report an error");
         checkFiniteAndPositive(gop, "randomSphere: finite positive radii/centers");
