@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <random>
 
 namespace gopack::geom {
 
@@ -363,6 +365,68 @@ std::pair<Scalar, Complex> affineNormalizer(std::vector<Complex> T) {
         ++outercount;
     }
     return {M[0], Complex(M[1], M[2])};
+}
+
+std::vector<Complex> randBdryPts(std::vector<Complex> graph, Index M) {
+    Index graphCount = static_cast<Index>(graph.size());
+    if (graphCount < 3 || M < 3) {
+        std::fprintf(stderr, "Poor data in \"randBdryPts\"\n");
+        return {};
+    }
+
+    // close up if necessary
+    if (std::abs(graph.front().real() - graph.back().real()) > 0.001 &&
+        std::abs(graph.front().imag() - graph.back().imag()) > 0.001) {
+        graph.push_back(graph.front());
+    }
+    graphCount = static_cast<Index>(graph.size());
+
+    // mark off by polygon (arc) length
+    std::vector<Scalar> lengthMarks(static_cast<size_t>(graphCount), 0.0);
+    for (Index i = 1; i < graphCount; ++i) {
+        lengthMarks[static_cast<size_t>(i)] =
+            lengthMarks[static_cast<size_t>(i) - 1] +
+            std::abs(graph[static_cast<size_t>(i)] - graph[static_cast<size_t>(i) - 1]);
+    }
+
+    // find M random ordered param spots in [0, total length]
+    static thread_local std::mt19937 rng(std::random_device{}());
+    std::uniform_real_distribution<Scalar> unit(0.0, 1.0);
+    std::vector<Scalar> arcSpots(static_cast<size_t>(M));
+    for (Index i = 0; i < M; ++i) {
+        arcSpots[static_cast<size_t>(i)] = unit(rng) * lengthMarks.back();
+    }
+    std::sort(arcSpots.begin(), arcSpots.end());
+
+    // convert by interpolation to points on the graph
+    std::vector<Complex> result(static_cast<size_t>(M));
+    Index spot = 0; // segment [spot, spot+1], 0-indexed into graph/lengthMarks
+    Scalar lastLength = lengthMarks[static_cast<size_t>(spot)];
+    Scalar nextLength = lengthMarks[static_cast<size_t>(spot) + 1];
+    for (Index i = 0; i < M; ++i) {
+        while (arcSpots[static_cast<size_t>(i)] < lastLength && spot > 0) {
+            spot--;
+            lastLength = lengthMarks[static_cast<size_t>(spot)];
+            nextLength = lengthMarks[static_cast<size_t>(spot) + 1];
+        }
+        // Defensive addition beyond the literal source (see header comment):
+        // guard against ever indexing lengthMarks[spot+1] out of bounds in
+        // the (essentially unreachable in practice, since arcSpots is
+        // strictly < lengthMarks.back() almost surely) edge case where an
+        // arc spot lands exactly on the total path length.
+        while (arcSpots[static_cast<size_t>(i)] > nextLength && spot + 2 < graphCount) {
+            spot++;
+            lastLength = lengthMarks[static_cast<size_t>(spot)];
+            nextLength = lengthMarks[static_cast<size_t>(spot) + 1];
+        }
+
+        Scalar setlength = nextLength - lastLength;
+        Scalar ratio = (setlength > 0.0) ? (arcSpots[static_cast<size_t>(i)] - lastLength) / setlength : 0.0;
+        result[static_cast<size_t>(i)] =
+            graph[static_cast<size_t>(spot)] +
+            ratio * (graph[static_cast<size_t>(spot) + 1] - graph[static_cast<size_t>(spot)]);
+    }
+    return result;
 }
 
 } // namespace gopack::geom

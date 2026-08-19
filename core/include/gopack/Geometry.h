@@ -56,4 +56,29 @@ CentroidResult centroid(const std::vector<Complex>& P, const std::array<Scalar, 
 // because the search mutates its own working copy.
 std::pair<Scalar, Complex> affineNormalizer(std::vector<Complex> T);
 
+// rand_bdry_pts.m -- choose M points uniformly at random (by arc length)
+// along a closed polygonal path 'graph' (a sequence of complex points; if
+// the path isn't already closed -- last point within 0.001 of the first, in
+// both real and imaginary parts -- it's closed automatically by appending a
+// copy of the first point, exactly matching the source). Returns the M
+// points in arc-length order along the path; note the returned list itself
+// is NOT closed. 'graph' is passed by value because it may be extended by
+// the auto-close step. Returns an empty vector (after printing a
+// diagnostic, matching the source's "Poor data" message) if graph.size()<3
+// or M<3.
+//
+// Used only by parseTriangles()'s eventual callers in the
+// randTriangulation.m family (still not ported -- see Packer.h); it has no
+// dependency on Packer and is portable on its own, which is why it's a free
+// function here rather than a Packer method, matching Geometry.h's existing
+// free-standing helpers.
+//
+// One small defensive addition beyond the literal source: if two consecutive
+// interpolation endpoints on the path coincide exactly (zero-length
+// segment), the interpolation ratio is taken as 0 rather than dividing by
+// zero (the MATLAB original has the same latent division-by-zero for a
+// literal duplicate boundary point; this only changes behavior in that
+// degenerate case).
+std::vector<Complex> randBdryPts(std::vector<Complex> graph, Index M);
+
 } // namespace gopack::geom

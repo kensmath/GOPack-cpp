@@ -32,6 +32,17 @@ identical to the source).
   uses (factored out so the two can't silently diverge), so a complex loaded
   either way behaves identically from that point on.
 - `complex_count`, `indxMatrices`, `FarVert`
+- `parse_triangles` -- ingest a bare `Nx3` triangle-list (as produced by a
+  Delaunay/convex-hull step, e.g. the `randTriangulation` family) directly,
+  building flowers/orientation/alpha from scratch, without going through the
+  `*.p` text format. `pruneComplex` -- remove orphan vertices (cut off from
+  the interior component) after such a triangulation, needed for bounded
+  (non-convex) regions. `rand_bdry_pts` -- pick `M` points uniformly at
+  random by arc length along a closed polygonal path (`gopack::geom::randBdryPts`
+  in `Geometry.h`; the only piece of the `rand*`/`Triangulation` family with
+  no external Delaunay/convex-hull dependency). See "Notes on
+  `parse_triangles`/`pruneComplex`/`rand_bdry_pts`" below for the handful of
+  deliberate deviations from the literal source.
 - **Mode 1 (maximal packing)** of the disc/plane, or the sphere if the
   complex has no boundary: `setMode` mode 1, `layoutBdry` / `setHoroCenters`
 - **Mode 2 (polygonal / rectangle packing)**: `setMode` mode 2 (corner
@@ -48,17 +59,34 @@ identical to the source).
   conversion (`e_to_h_data`, `h_to_e_data`, `e_to_s_data`, `s_to_e_data`,
   `sph_tangent`, `affineNormalizer`, `Centroid`, `loadTangency`)
 - `cosAngle`, `cosCorner`
+- `gopack::geom::delaunayPlane` / `convexHull3` (`core/src/RandomGen.cpp`) --
+  **not part of the original MATLAB source**; thin C++ bindings to the
+  vendored Triangle (plane constrained Delaunay) and Qhull (3D convex hull)
+  libraries (see "Vendored third-party libraries" below), doing for C++ what
+  MATLAB's built-in `delaunayTriangulation`/`convhulln` do for
+  `randTriangulation.m`. Themselves fully tested (`tests/test_random_gen.cpp`).
+- Random triangulation *generation* -- `randTriangulation` (as
+  `gopack::geom::randTriangulationSphere`/`randTriangulationPlane`,
+  `core/src/RandomGen.cpp`, built directly on `delaunayPlane`/`convexHull3`
+  above) and `randomDisc`/`randomSphere`/`randomRectangle`/`randomSquare`/
+  `randomTri` (as `Packer::randomDisc`/`randomSphere`/`randomRectangle`/
+  `randomSquare`/`randomTri`, `core/src/PackerRandom.cpp`, built on
+  `parse_triangles`/`pruneComplex` above). Covered by
+  `tests/test_random_packers.cpp`, and exposed from the standalone CLI (not
+  just JNI, per Ken's request that the standalone executable have this
+  capability too, independent of CirclePack) via `--random-disc`/
+  `--random-sphere`/`--random-square`/`--random-rectangle`/`--random-tri` --
+  see "CLI usage" below. `randomTri`'s arbitrary-polygon-region overload is
+  also exposed via JNI as `computeRandomTri` -- see "Java usage" below. See
+  "Notes on the `randTriangulation` family" below for the
+  deliberate deviations from the literal source (two bug fixes, and one
+  simplification enabled by Triangle's native boundary-carving).
 
-**Understood but NOT yet ported** (calling these throws
-`gopack::NotImplementedError` with a message pointing at the source file,
-rather than guessing at behavior):
+**Understood but NOT yet ported**:
 
-- The bare triangle-list and OFF file readers (`parse_triangles`)
-- Orphan-vertex removal (`pruneComplex` -- only used by the random
-  rectangle/square generators, not by loading real packing files)
-- Random triangulation generation (`randTriangulation`, `randomDisc`,
-  `randomSphere`, `randomRectangle`, etc.) and the plotting method (`show`,
-  which has no headless equivalent anyway)
+- The `OFF` file format fallback in `readpack` (calling it prints a
+  diagnostic and returns 0, rather than guessing at behavior)
+- The plotting method (`show`, which has no headless equivalent anyway)
 
 If your workflow needs any of the above, say so -- the source for all of
 them has already been read and understood (see the corresponding `.m`
@@ -92,18 +120,207 @@ files), so porting them is a bounded follow-up, not new research.
   value would make `writepack()` apply a conversion to already-euclidean
   polygon output that was never intended for it.
 
+### Notes on `parse_triangles`/`pruneComplex`/`rand_bdry_pts`
+
+- `parse_triangles.m`'s own alpha-auto-selection fallback (used when no
+  alpha was already set before the call) indexes its `utilFlag` boundary-seed
+  array using the *new* (renumbered) vertex numbers as if they were the
+  *old* ones -- only actually correct when the input's vertex numbering is
+  already contiguous from 1 (`nodeCount == top`), which is true for this
+  function's real callers (fresh Delaunay/hull output always numbers its
+  points contiguously). Ported literally, since "fix" here would mean
+  guessing at an unintended generalization rather than correcting a clear
+  bug -- if a future caller passes genuinely sparse vertex numbers, alpha
+  selection may pick a less-than-ideal (but still valid; `complex_count()`
+  independently re-validates alpha regardless) vertex.
+- `pruneComplex.m` reads `obj.vlist(j)` *after* `obj.vlist` was just cleared
+  two lines earlier in the source -- real undefined behavior (out-of-bounds
+  access) in a literal C++ port, not just a MATLAB quirk to preserve. Fixed
+  to read from a saved local copy of the pre-clear `vlist` instead.
+- `pruneComplex.m` has `origCenters(nv)=obj.origCenters(nv)`, almost
+  certainly a typo for `obj.origCenters(v)` -- it should read from the OLD
+  numbering, exactly like the `origRadii` line right above it and every
+  other line in that loop. Ported as the evident intent (a literal port
+  would silently read whichever old-numbered vertex happens to share `nv`'s
+  *new* index -- wrong data, not just a crash).
+- `pruneComplex.m`'s local `v2indx`/`indx2v` variables are renamed
+  `oldToNew`/`newToOld` in the port: an unqualified `v2indx` inside a
+  `Packer` member function would otherwise mean the real `Packer::v2indx`
+  *member*, which serves an unrelated purpose (sparse-matrix layout
+  indexing, set up by `indxMatrices()`) -- MATLAB's `obj.v2indx` vs. a
+  same-named local are different namespaces, but C++ has no such
+  distinction.
+- `rand_bdry_pts.m`'s auto-close check is `abs(diffX)>0.001 AND
+  abs(diffY)>0.001` (not OR) -- so a path whose first and last points
+  coincide in exactly one coordinate (e.g. two corners of an axis-aligned
+  rectangle) is *not* auto-closed. Ported literally as a preserved quirk,
+  not a typo fix, since it's a plausible (if debatable) deliberate choice
+  rather than an unambiguous slip; see `tests/test_rand_bdry_pts.cpp` for a
+  worked example of what does and doesn't trigger it.
+- `randBdryPts` adds one small defensive guard beyond the literal source:
+  the interpolation ratio is taken as 0 (rather than dividing by zero) if
+  two consecutive path points coincide exactly, and the forward arc-length
+  scan is bounds-checked against running past the last segment -- both
+  latent (if practically unreachable) issues in the MATLAB original too.
+
+### Notes on the `randTriangulation` family
+
+- **Simplification enabled by Triangle's native boundary carving**:
+  `randTriangulation.m`'s plane-region case runs ~90 lines of its own manual
+  post-hoc trimming (corner-convexity checks, then discarding boundary-only
+  and out-of-region faces) after `delaunayTriangulation(X,Y,C)`, because
+  MATLAB's triangulator only enforces constraint edges as *present* -- it
+  doesn't exclude a non-convex region's exterior on its own. Triangle does
+  this natively (passing a closed segment loop without the `-c` switch makes
+  it discard everything outside the segment-bounded region, concavities
+  included), so none of that manual trimming logic is ported --
+  `gopack::geom::randTriangulationPlane` (`RandomGen.cpp`) relies on
+  `delaunayPlane`'s constrained mode directly. Verified against a non-convex
+  L-shaped region using its own true vertices as the boundary (checked by
+  total area, confirming the missing corner isn't filled in) in both
+  `tests/test_random_gen.cpp` (the raw `delaunayPlane` binding) and
+  ASan/UBSan-instrumented sandbox validation of the full
+  `randTriangulationPlane` orchestration.
+- **Bug fix**: `randTriangulation.m`'s (and `randomDisc.m`'s own separate
+  copy of the same loop's) rejection-sampling safety counter is only
+  incremented on a *successful* hit, never on a rejected attempt -- so a
+  region with low acceptance probability (e.g. a thin sliver) can spin the
+  real MATLAB loop indefinitely, since the cap it's compared against can
+  never actually be reached. Fixed to increment on every attempt; verified
+  in sandbox validation that a deliberately thin sliver polygon with a large
+  point request returns promptly rather than hanging.
+- **Bug fix**: `randomTri.m` sets its local `GOPacker`'s `alpha` to `-1`
+  before calling `randTriangulation`, and only overwrites it if
+  `randTriangulation` returns a positive `alpha` (i.e. a valid `cent` was
+  placed) -- but `parse_triangles.m`'s own alpha-auto-selection only
+  triggers on `alpha==0`, not on a negative value, so a plain call without
+  `cent` (or with a `cent` outside the region) hands back a `Packer` with an
+  unresolved, invalid `alpha=-1`. `randomRectangle.m`, which has the same
+  "`cent` may land outside the region" situation, avoids this because it
+  never sets its `GOPacker`'s `alpha` away from its constructor default (0)
+  in that case. `Packer::randomTri`'s plane-region overload leaves `alpha`
+  at its `Packer()`-default 0 instead, letting the existing auto-selection
+  produce a valid vertex.
+- **Caveat inherited unchanged from `randTriangulation.m` (not a port bug,
+  and not something Triangle's native carving above fixes or could fix)**:
+  the boundary segments `randTriangulationPlane` triangulates against --
+  and the source's own `inpolygon` rejection-sampling checks -- are built
+  from `bdryN` *sampled* points chord-connected in arc-length order, not
+  from `graph`'s own vertices directly, in both the C++ port and the
+  original MATLAB (`rand_bdry_pts`/`randBdryPts`'s output feeds both). The
+  triangulated region only converges to `graph`'s true shape as `bdryN`
+  grows; for a sparse `bdryN` relative to a concave shape's feature size, the
+  inscribed chord polygon can visibly shortcut a notch, and any point that
+  ends up outside that chord polygon (despite being inside the true `graph`)
+  is correctly excluded from the triangulation -- discovered and quantified
+  during this port's sandbox validation (see `RandomGen.h`'s doc comment on
+  `randTriangulationPlane` for the full explanation and a worked example).
+  This only matters for `Packer::randomTri`'s generic plane-region overload
+  with a caller-supplied concave `graph` and a small `bdryN`; `randomDisc`/
+  `randomSphere`/`randomRectangle`/`randomSquare` (the CLI-exposed
+  generators) never hit it, since a circle and a rectangle have no concave
+  features to shortcut. `Packer::randomRectangle` also calls `pruneComplex()`
+  (matching `randomRectangle.m`) specifically to clean up any point this
+  does affect; `Packer::randomTri`'s plane overload does not (matching
+  `randomTri.m`), so a caller who wants that cleanup there should call
+  `pruneComplex()`/`indxMatrices()` on the result themselves.
+
+### Notes on spherical packing normalization
+
+- `reapResults()` now recenters `centers`/`radii` for Spherical packings
+  (the same affine-normalization `affineNormalizer`/`centroid` in
+  `Geometry.cpp` compute, moving the tangency-point centroid to the origin
+  in 3D) -- **not part of `reapResults.m`**, which has no such step.
+  `writepack()`'s Spherical branch used to be the only place this
+  normalization happened, which meant any caller reading
+  `Packer::centers`/`radii` directly after `riffle()` instead of going
+  through `writepack()` -- notably the JNI bridge's
+  `computeMaximalPackingFromComplex`, which never calls `writepack()` at
+  all -- got an un-normalized, possibly lopsided packing. Every caller now
+  gets a normalized packing for free as soon as `riffle()` returns.
+- `writepack()` still does its own `affineNormalizer` call too, on purpose:
+  it's the only safety net for a caller who calls `writepack()` on a
+  Spherical packing that was just `readpack()`/`loadComplex()`-loaded but
+  never `riffle()`d (so `reapResults()` never ran). `affineNormalizer` is
+  idempotent on an already-centered input -- its very first centroid check
+  is already within tolerance, so it returns the identity transform
+  (`A=1, B=0`) immediately -- so this costs one cheap redundant pass over
+  the tangency points on the normal riffle-then-write path, not a second
+  real optimization.
+
+### A deliberate deviation from the literal source: the `proj_vec_to_sph` typo
+
+`code/s_to_e_data.m` calls a function `proj_vec_to_sph` that does not exist
+anywhere in the repository -- it's a typo for `proj_vec_to_s.m`. The C++
+port (`geom::sToEData` in `core/src/Geometry.cpp`) calls the real function,
+since that's unambiguously the intent; reproducing the bug would mean this
+one rarely-hit code path (spherical circles enclosing the point at infinity)
+throws in MATLAB and silently "works" here. (This one is a straight bug fix
+with no behavioral trade-off either way, unlike the `setMode(2, ...)`
+hes-reset and `reapResults()` spherical-normalization notes above, which
+are deliberate behavior changes beyond the literal source rather than typo
+fixes -- all three are the deviations this port currently knows about.)
+
 ## What has -- and hasn't -- been verified
 
-- Four regression tests (`tests/test_hex_flower.cpp`,
+- Ten regression tests (`tests/test_hex_flower.cpp`,
   `tests/test_readpack_roundtrip.cpp`, `tests/test_polygonal.cpp`,
-  `tests/test_loadcomplex.cpp`) exercise the pipeline on the classical "hex
-  flower" complex (one interior vertex of degree 6 ringed by 6 boundary
+  `tests/test_loadcomplex.cpp`, `tests/test_sphere_normalize.cpp`,
+  `tests/test_parse_triangles.cpp`, `tests/test_prune_complex.cpp`,
+  `tests/test_rand_bdry_pts.cpp`, `tests/test_random_gen.cpp`,
+  `tests/test_random_packers.cpp`) exercise the pipeline on the classical
+  "hex flower" complex (one interior vertex of degree 6 ringed by 6 boundary
   vertices) in both modes, checking angle-sum convergence and symmetric
   radii for mode 1, a read/riffle/write/re-read round trip, that a 4-corner
   rectangle layout (mode 2) stays finite, positive, and rectangle-shaped
-  after riffling, and that `loadComplex()` produces a packing that agrees
-  with a hand-built (readpack()-equivalent) `Packer` to within 1e-9 --
-  including its alpha-resolution and optional-radii/vAims-override paths.
+  after riffling, that `loadComplex()` produces a packing that agrees with a
+  hand-built (readpack()-equivalent) `Packer` to within 1e-9 -- including
+  its alpha-resolution and optional-radii/vAims-override paths -- that
+  `Packer::centers`/`radii` for a real 1000-vertex spherical triangulation
+  (`tests/data/sphtest1000.p`) are already centroid-normalized right after
+  `riffle()` with no call to `writepack()`, that `parse_triangles` correctly
+  reconstructs a hex-flower fan and a closed tetrahedron (Spherical, with
+  the 3-vertex pseudo-boundary anchor triangle `complex_count.m` always
+  gives a boundary-less complex) from a bare triangle list, that
+  `pruneComplex` removes an orphan vertex deliberately attached via a "flap"
+  face and leaves a still-convergent packing behind, that `rand_bdry_pts`'s
+  returned points all lie exactly on the source polygon's boundary
+  (including its auto-close path), that `delaunayPlane`/`convexHull3` (the
+  vendored Triangle/Qhull bindings) produce a correct constrained
+  triangulation of a non-convex L-shaped region (checked by total area,
+  confirming the missing corner wasn't filled in) and a correct 3D convex
+  hull of points on a sphere (checked against Euler's formula, `F = 2V-4`,
+  for a 200-point case), and that all five `Packer::random*` generators
+  produce valid, riffle-convergent packings with the right `hes`/`mode`/
+  `alpha`/corner metadata -- including a specific regression check that the
+  `randomTri` `alpha=-1` bug fix above actually produces a valid vertex
+  number, not the source's unresolved `-1`.
+- **The vendored Triangle/Qhull integration, and the geometric-primitive
+  layer built directly on it, was actually compiled and run in this
+  sandbox** (unlike most of the rest of this port, which is syntax/logic-
+  checked in isolation but only really build-tested on Ken's Windows
+  machine): both libraries' real vendored source, plus
+  `gopack::geom::delaunayPlane`/`convexHull3`/`randTriangulationSphere`/
+  `randTriangulationPlane`/`pointInPolygon` (`RandomGen.cpp`) calling into
+  them, were built with `-fsanitize=address,undefined` and exercised against
+  real geometry (the L-shape and sphere cases above, plus an octahedron,
+  unconstrained square+center-point case, and -- specifically for this
+  session's new orchestration functions -- a dense-boundary-sampling
+  convergence check, a `cent`-placement/rejection check, and a thin-sliver
+  no-hang check for the rejection-sampling bug fix above) with no sanitizer
+  reports. The `Packer`-level `randomDisc`/`randomSphere`/`randomRectangle`/
+  `randomSquare`/`randomTri` generators (`PackerRandom.cpp`) were compile-
+  checked for real against this sandbox's minimal Eigen stand-in (same as
+  the rest of `Packer`, see below), and their Eigen-independent inner
+  logic -- `parseTriangles()`/`pruneComplex()`, which is what these
+  generators actually feed their triangulations through -- was additionally
+  compiled, linked, and run for real against the new orchestration
+  functions' actual output (not synthetic input), which is how the
+  boundary-chord-approximation caveat documented above was discovered and
+  quantified in the first place. This is a materially stronger verification
+  bar than the "compiles cleanly against a minimal Eigen stand-in" level the
+  rest of this port gets in-sandbox, since none of this layer depends on
+  Eigen at all.
 - **Mode 1 has been built and run successfully on real Windows hardware**,
   including on genuinely large inputs (up to ~500,000 vertices from
   `GOPack/data/lace500000_K.p`), producing packings that loaded correctly
@@ -128,13 +345,53 @@ files), so porting them is a bounded follow-up, not new research.
   MATLAB on one of the `data/*.p` files and compare the resulting
   `obj.radii` against this port's `gopack_cli` output on the same file.
 
+## Vendored third-party libraries
+
+GOPack-cpp vendors (commits directly into the repo) two small third-party C
+libraries under `third_party/`, used by the random-triangulation
+*generation* family (`gopack::geom::delaunayPlane`/`convexHull3`/
+`randTriangulationSphere`/`randTriangulationPlane` and
+`Packer::randomDisc`/`randomSphere`/`randomRectangle`/`randomSquare`/
+`randomTri` -- see "Fully ported and covered by tests" above):
+
+- **[Triangle](https://www.cs.cmu.edu/~quake/triangle.html)** (Jonathan
+  Richard Shewchuk, v1.6, 2005) -- plane constrained Delaunay triangulation,
+  what `randTriangulation.m`'s plane-region case uses MATLAB's
+  `delaunayTriangulation(X,Y,C)` for.
+- **[Qhull](https://github.com/qhull/qhull)** (v2020.2, `src/libqhull_r`
+  only) -- 3D convex hull, what `randTriangulation.m`'s sphere case uses
+  MATLAB's `convhulln` for.
+
+See `third_party/triangle/README.md` and `third_party/qhull/README.md` for
+exactly what's vendored (a deliberately minimal subset of each upstream
+project -- not the CLI frontends, GUI tools, or docs), what license terms
+apply, and how `core/src/RandomGen.cpp` calls into each.
+
+**Why vendored (committed) rather than fetched at build time, unlike
+Eigen above:** Eigen is a large, actively-maintained project with a fast git
+host, so `FetchContent`-ing it on demand (falling back from a local
+checkout) is a reasonable trade of repo size for staying current. Triangle
+and Qhull are the opposite case -- Triangle hasn't been updated since 2005
+and has no official git repository at all, and both are small enough
+(under 2MB combined) that committing them costs nothing meaningful. Ken's
+call: a working executable that builds identically offline, regardless of
+whether `cs.cmu.edu` or `github.com` happen to be reachable (or whether
+either project is still there at all) beats a network dependency on two
+old, low-traffic upstream projects, and license terms aren't a concern for
+this project's own (research/academic) use either way. Once vendored,
+`GOPACK_BUILD_RANDOM_GEN=OFF` remains available for anyone who'd rather not
+build them at all.
+
 ## Building
 
-Requires CMake 3.18+ and a C++17 compiler. Eigen is vendored via a local
-checkout at `./eigen` if present (fully offline after that one-time clone),
-falling back to CMake `FetchContent` (needs network access) if `./eigen`
-doesn't exist. A JDK (`JAVA_HOME` set) is needed only for the optional JNI
-target.
+Requires CMake 3.18+ and a C compiler (for the vendored Triangle/Qhull
+libraries) and C++17 compiler. Eigen is vendored via a local checkout at
+`./eigen` if present (fully offline after that one-time clone), falling
+back to CMake `FetchContent` (needs network access) if `./eigen` doesn't
+exist -- Triangle and Qhull, by contrast, are committed directly into the
+repo under `third_party/` and never touch the network at all (see "Vendored
+third-party libraries" above). A JDK (`JAVA_HOME` set) is needed only for
+the optional JNI target.
 
 ```
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -147,8 +404,19 @@ Build options (pass as `-D<OPTION>=OFF` to disable):
 - `GOPACK_BUILD_CLI` (default ON) -- the `gopack` command-line executable
 - `GOPACK_BUILD_JNI` (default ON, skipped automatically if no JDK is found)
   -- `gopack_jni.dll` / `libgopack_jni.dylib` for the Java bridge
-  (`org.kensmath.gopack.GOPackNative`, in `jni/java/`)
+  (`JNI.GOPackNative`, in `jni/java/`; package `JNI`, not
+  `org.kensmath.gopack`, since 8/2026 -- see that class's doc comment)
 - `GOPACK_BUILD_TESTS` (default ON)
+- `GOPACK_BUILD_RANDOM_GEN` (default ON) -- build the vendored
+  Triangle/Qhull libraries and the whole random-triangulation *generation*
+  family built on them (`gopack::geom::delaunayPlane`/`convexHull3`/
+  `randTriangulationSphere`/`randTriangulationPlane` and
+  `Packer::randomDisc`/`randomSphere`/`randomRectangle`/`randomSquare`/
+  `randomTri` -- see "Vendored third-party libraries" above). Disabling this
+  also disables `tests/test_random_gen.cpp`/`tests/test_random_packers.cpp`
+  and the CLI's `--random-*` flags (see "CLI usage" below);
+  `GOPACK_HAVE_RANDOM_GEN` is defined for the rest of the codebase to
+  `#ifdef` around when this is off.
 - `GOPACK_USE_SUITESPARSE` (default OFF) -- swap Eigen's built-in sparse
   solvers for SuiteSparse/CHOLMOD; not wired up yet (Eigen was the chosen
   default for portability), but `core/include/gopack/SparseLinearSolver.h`
@@ -157,8 +425,14 @@ Build options (pass as `-D<OPTION>=OFF` to disable):
 ## CLI usage
 
 ```
-gopack input.p -o output.p [--passes 20] [--eucl-out]
+gopack input.p -o output.p [--passes 200] [--eucl-out]
 gopack input.p -o output.p --polygon [--corners v1,v2,v3,v4] [--angles a1,a2,a3,a4]
+gopack --random-disc N -o output.p [--passes 200] [--eucl-out]
+gopack --random-sphere N -o output.p [--passes 200]
+gopack --random-square N -o output.p [--passes 200] [--eucl-out]
+gopack --random-rectangle N[,aspect[,bdryN]] -o output.p [--passes 200] [--eucl-out]
+gopack --random-tri intN,bdryN --graph x1,y1,x2,y2,... -o output.p [--cent cx,cy]
+       [--passes 200] [--eucl-out]
 ```
 
 `--polygon` switches to mode 2 (polygonal/rectangle packing). `--corners` is
@@ -171,6 +445,32 @@ exactly `pi/2` each for a 4-corner input, which is what triggers the
 rectangle-specific layout in `setRectCenters`). With exactly 4 corners, the
 CLI also prints the resulting aspect ratio (`getAspect`).
 
+`--random-disc`/`--random-sphere`/`--random-square`/`--random-rectangle`
+generate a fresh "geometrically random" triangulation (see
+`Packer::randomDisc`/`randomSphere`/`randomSquare`/`randomRectangle` above)
+instead of reading `<input.p>` -- these are mutually exclusive with the
+positional `<input.p>` argument and with each other, and are only available
+in a build with `GOPACK_BUILD_RANDOM_GEN` on (the default). `--random-square`
+and `--random-rectangle` already leave the generated packing in polygonal
+mode with 4 corners chosen automatically, so `--polygon`/`--corners`/
+`--angles` are ignored for those two. `--random-rectangle` takes a single
+comma-separated argument: `N` (interior point count) is required; `aspect`
+(default 1) sets the rectangle to `[-aspect,aspect]x[-1,1]`; `bdryN` (default
+computed from `N` and `aspect`, matching `randomRectangle.m`) overrides the
+boundary point count.
+
+`--random-tri intN,bdryN` generates a random triangulation of an **arbitrary**
+closed polygonal region -- not just a disc/square/rectangle -- via
+`Packer::randomTri(intN, bdryN, graph, cent)`. The boundary polygon is given
+with the required `--graph x1,y1,x2,y2,...` flag: a flat x,y coordinate list,
+at least 3 points, in order around the boundary (don't repeat the first
+point at the end). `--cent cx,cy` optionally names a point inside `--graph`
+to use as the packing's alpha (centering) vertex; if omitted, or the point
+isn't actually inside the boundary, alpha is chosen automatically. Unlike
+`--random-square`/`--random-rectangle`, this stays in max-pack mode (mode 1)
+-- a generic region has no "corners" concept -- so `--polygon`/`--corners`/
+`--angles` still apply afterward if you want polygonal mode on the result.
+
 ## Java usage
 
 Two ways to compute a maximal packing (mode 1) from Java, depending on
@@ -178,17 +478,39 @@ whether your data starts out in a `*.p` file or already in memory:
 
 ```java
 // From a file:
-double[] radii = org.kensmath.gopack.GOPackNative.computeMaximalPacking(
+double[] radii = JNI.GOPackNative.computeMaximalPacking(
     "input.p", /* geometryHint (reserved) */ 0, /* tolerance (reserved) */ 0.0,
-    /* maxPasses */ 20);
+    /* maxPasses */ 200);
 
 // From an in-memory complex (e.g. CirclePack's own per-vertex flower data):
 int[][] flowers = new int[nodeCount + 1][]; // flowers[0] unused
 // ... fill flowers[1..nodeCount], CLOSED (first==last) for interior
 //     vertices, OPEN (first!=last) for boundary vertices ...
-double[] radii2 = org.kensmath.gopack.GOPackNative.computeMaximalPackingFromComplex(
+double[] radii2 = JNI.GOPackNative.computeMaximalPackingFromComplex(
     nodeCount, flowers, /* geometry: 0=eucl -1=hyp +1=sph */ 0,
-    /* tolerance (reserved) */ 0.0, /* maxPasses */ 20);
+    /* tolerance (reserved) */ 0.0, /* maxPasses */ 200);
+```
+
+A third method, `computeRandomTri`, generates a random triangulation of an
+arbitrary closed polygonal region (the JNI counterpart to the CLI's
+`--random-tri`) and computes its maximal packing in one call, and a fourth,
+`computeRandomDisc`, does the same for the unit disc (the JNI counterpart to
+`--random-disc`):
+
+```java
+double[] graphXY = { 0,0, 4,0, 4,3, 0,3 }; // a 4x3 rectangle, as an example
+JNI.RandomComplexResult result =
+    JNI.GOPackNative.computeRandomTri(
+        /* intN */ 40, /* bdryN */ 20, graphXY,
+        /* centX, centY, hasCent */ 0.0, 0.0, false,
+        /* maxPasses */ 200);
+// or: JNI.RandomComplexResult result = JNI.GOPackNative.computeRandomDisc(
+//         /* n */ 200, /* maxPasses */ 200);
+// result.nodeCount, result.flowers, result.radii, result.centersRe/centersIm,
+// result.geometry, result.alpha, result.gamma are all populated (1-indexed,
+// index 0 unused, same convention as radii/radii2 above) -- unlike
+// computeMaximalPacking[FromComplex], the caller didn't supply the
+// combinatorics, so the whole generated complex comes back, not just radii.
 ```
 
 `radii`/`radii2` both have length `nodeCount+1`, and `radii[v]` is vertex

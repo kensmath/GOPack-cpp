@@ -33,13 +33,20 @@ int main() {
     Packer packer;
     packer.nodeCount = 7;
     packer.flowers.assign(8, {});
+    // Boundary flowers listed in correct counterclockwise order (matching
+    // vertex 1's own 2,3,4,5,6,7 CCW ordering -- see the fixed-up
+    // tests/data/small_disc.p, which hand-authored this exact same hex
+    // flower and originally had these six rows backward; this test happened
+    // to still pass either way since the hexagon's symmetry makes the
+    // angle-sum/radii checks below orientation-agnostic, which is exactly
+    // why the mistake went unnoticed).
     packer.flowers[1] = {2, 3, 4, 5, 6, 7, 2};
-    packer.flowers[2] = {7, 1, 3};
-    packer.flowers[3] = {2, 1, 4};
-    packer.flowers[4] = {3, 1, 5};
-    packer.flowers[5] = {4, 1, 6};
-    packer.flowers[6] = {5, 1, 7};
-    packer.flowers[7] = {6, 1, 2};
+    packer.flowers[2] = {3, 1, 7};
+    packer.flowers[3] = {4, 1, 2};
+    packer.flowers[4] = {5, 1, 3};
+    packer.flowers[5] = {6, 1, 4};
+    packer.flowers[6] = {7, 1, 5};
+    packer.flowers[7] = {2, 1, 6};
     packer.alpha = 1;
     packer.gamma = 0;
     packer.hes = Geometry::Euclidean;

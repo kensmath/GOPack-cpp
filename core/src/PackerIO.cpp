@@ -1,10 +1,13 @@
 #include "gopack/Packer.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <fstream>
 #include <istream>
 #include <sstream>
+#include <stdexcept>
+#include <utility>
 
 #include "gopack/Geometry.h"
 
@@ -297,7 +300,17 @@ Index Packer::ingestFlowers(Index nodeCountIn, const std::vector<std::vector<Ind
 Index Packer::finalizeComplex(const std::vector<Scalar>* initRadii,
                                const std::vector<Complex>* initCenters,
                                const std::vector<Scalar>* vAimsIn, const std::string& label) {
-    complexCount();
+    // Bug fix vs. the MATLAB source: neither this call nor parseTriangles()'s
+    // below ever checked complex_count()'s return value, so a malformed
+    // complex (see complexCount()'s own updated doc comment) would silently
+    // fall through to everything below -- eventually corrupting the sparse
+    // system indxMatrices()/layoutCenters() build, rather than failing here
+    // with a clear diagnostic.
+    if (complexCount() < 0) {
+        throw std::runtime_error(
+            "Packer::finalizeComplex: complexCount() failed -- the complex has a "
+            "malformed boundary (see the preceding stderr diagnostic)");
+    }
     if (orphanCount > 0) {
         std::fprintf(stderr,
                      "Warning: orphan vertices were found (vertices w/o interior "
@@ -385,11 +398,304 @@ Index Packer::loadComplex(Index nodeCountIn, const std::vector<std::vector<Index
     return finalizeComplex(initRadii, initCenters, vAimsIn, label);
 }
 
-Index Packer::parseTriangles() {
-    throw NotImplementedError(
-        "Packer::parseTriangles: bare triangle-list / OFF input reading has not "
-        "been ported yet (parse_triangles.m). readpack() supports the *.p "
-        "FLOWERS format directly, which is GOPack's preferred format.");
+ParseTrianglesResult Packer::parseTriangles(std::vector<std::array<Index, 3>> tList,
+                                             const std::vector<Complex>* cents) {
+    ParseTrianglesResult result;
+
+    const Index N = static_cast<Index>(tList.size());
+    if (N == 0) {
+        std::fprintf(stderr, "Packer::parseTriangles: empty triangle list\n");
+        return result;
+    }
+
+    Index holdalpha = alpha;
+    cleanse();
+    alpha = holdalpha;
+
+    edgeCount = 0;
+    faceCount = N;
+
+    // Range of vertex numbers encountered. (parse_triangles.m also tracks a
+    // 'bottom' here, but never reads it again after computing it -- it's
+    // dead in the source too -- so it's omitted.)
+    Index top = 0;
+    for (Index f = 0; f < N; ++f) {
+        for (int j = 0; j < 3; ++j) {
+            top = std::max(top, tList[static_cast<size_t>(f)][static_cast<size_t>(j)]);
+        }
+    }
+    if (top <= 0) {
+        std::fprintf(stderr, "Packer::parseTriangles: no valid (positive) vertex numbers found\n");
+        return result;
+    }
+
+    // clicks[v] = number of faces containing v
+    std::vector<Index> clicks(static_cast<size_t>(top) + 1, 0);
+    for (Index f = 0; f < N; ++f) {
+        for (int j = 0; j < 3; ++j) {
+            clicks[static_cast<size_t>(tList[static_cast<size_t>(f)][static_cast<size_t>(j)])]++;
+        }
+    }
+
+    // nodefaces[v] = (1-indexed) face numbers containing v; an entry is
+    // zeroed out as it's consumed by the flower walk below.
+    std::vector<std::vector<Index>> nodefaces(static_cast<size_t>(top) + 1);
+    std::vector<Index> vnum(static_cast<size_t>(top) + 1, 0);
+    for (Index f = 1; f <= N; ++f) {
+        const auto& face = tList[static_cast<size_t>(f) - 1];
+        for (int j = 0; j < 3; ++j) {
+            Index v = face[static_cast<size_t>(j)];
+            if (vnum[static_cast<size_t>(v)] == 0) {
+                nodefaces[static_cast<size_t>(v)].assign(static_cast<size_t>(clicks[static_cast<size_t>(v)]), 0);
+            }
+            vnum[static_cast<size_t>(v)]++;
+            nodefaces[static_cast<size_t>(v)][static_cast<size_t>(vnum[static_cast<size_t>(v)]) - 1] = f;
+        }
+    }
+
+    // Build each reachable vertex's flower by walking around it face by
+    // face, starting from the first vertex of the first face and spreading
+    // to every vertex touched by a connected face, exactly mirroring
+    // parse_triangles.m's target/utilFlag/preflower walk (including its
+    // in-place reversal of any face discovered with the "wrong" winding
+    // relative to the first face, so the whole complex ends up consistently
+    // oriented). utilFlag: 0 = not yet encountered; -1 = done (interior);
+    // -2 = done (boundary); f>0 = encountered, discovered via face f.
+    std::vector<std::vector<Index>> tmpflower(static_cast<size_t>(top) + 1);
+    std::vector<Index> utilFlag(static_cast<size_t>(top) + 1, 0);
+
+    Index target = tList[0][0]; // first vertex of first face
+    utilFlag[static_cast<size_t>(target)] = 1;
+
+    while (target != 0) {
+        Index first_face = utilFlag[static_cast<size_t>(target)];
+        const auto& fvertFirst = tList[static_cast<size_t>(first_face) - 1];
+
+        Index ffindx = 0;
+        for (Index i = 0; i < vnum[static_cast<size_t>(target)]; ++i) {
+            if (nodefaces[static_cast<size_t>(target)][static_cast<size_t>(i)] == first_face) {
+                ffindx = i;
+                break;
+            }
+        }
+
+        std::vector<Index> preflower(static_cast<size_t>(2 * vnum[static_cast<size_t>(target)] + 4), 0);
+        Index front = 0, back = 0;
+
+        // handle the first face separately: put its two neighbors of
+        // 'target' in the middle of preflower, in proper (cclw) order.
+        for (int j = 0; j < 3; ++j) {
+            if (fvertFirst[static_cast<size_t>(j)] == target) {
+                Index v1 = fvertFirst[static_cast<size_t>((j + 1) % 3)];
+                Index v2 = fvertFirst[static_cast<size_t>((j + 2) % 3)];
+                back = vnum[static_cast<size_t>(target)];
+                front = back + 1;
+                preflower[static_cast<size_t>(back)] = v1;
+                preflower[static_cast<size_t>(front)] = v2;
+
+                if (utilFlag[static_cast<size_t>(v1)] == 0) utilFlag[static_cast<size_t>(v1)] = first_face;
+                if (utilFlag[static_cast<size_t>(v2)] == 0) utilFlag[static_cast<size_t>(v2)] = first_face;
+                nodefaces[static_cast<size_t>(target)][static_cast<size_t>(ffindx)] = 0; // face used
+                break;
+            }
+        }
+
+        // forward (counterclockwise)
+        int hit = 1;
+        while (hit != 0 && preflower[static_cast<size_t>(front)] != preflower[static_cast<size_t>(back)]) {
+            hit = 0;
+            Index v = preflower[static_cast<size_t>(front)];
+            for (Index i = 0; i < vnum[static_cast<size_t>(target)]; ++i) {
+                Index next_face = nodefaces[static_cast<size_t>(target)][static_cast<size_t>(i)];
+                if (next_face > 0 && hit == 0) {
+                    auto& fvert = tList[static_cast<size_t>(next_face) - 1];
+                    Index w = 0;
+                    for (int j = 0; j < 3; ++j) {
+                        if (fvert[static_cast<size_t>(j)] == target) {
+                            Index va = fvert[static_cast<size_t>((j + 1) % 3)];
+                            Index vb = fvert[static_cast<size_t>((j + 2) % 3)];
+                            if (va == v) {
+                                w = vb;
+                            } else if (vb == v) { // must reverse this face
+                                w = va;
+                                std::swap(fvert[0], fvert[1]);
+                            }
+                            break;
+                        }
+                    }
+                    if (w > 0) {
+                        front++;
+                        preflower[static_cast<size_t>(front)] = w;
+                        if (utilFlag[static_cast<size_t>(w)] == 0) utilFlag[static_cast<size_t>(w)] = next_face;
+                        hit = 1;
+                        nodefaces[static_cast<size_t>(target)][static_cast<size_t>(i)] = 0; // face used
+                    }
+                }
+            }
+        } // done with forward direction
+
+        // flower still open? must be a boundary vertex; add petals backward.
+        if (preflower[static_cast<size_t>(front)] != preflower[static_cast<size_t>(back)]) {
+            hit = 1;
+            while (hit != 0 && preflower[static_cast<size_t>(front)] != preflower[static_cast<size_t>(back)]) {
+                hit = 0;
+                Index w = preflower[static_cast<size_t>(back)];
+                for (Index i = 0; i < vnum[static_cast<size_t>(target)]; ++i) {
+                    Index next_face = nodefaces[static_cast<size_t>(target)][static_cast<size_t>(i)];
+                    if (hit == 0 && next_face > 0) {
+                        auto& fvert = tList[static_cast<size_t>(next_face) - 1];
+                        Index v = 0;
+                        for (int j = 0; j < 3; ++j) {
+                            if (fvert[static_cast<size_t>(j)] == target) {
+                                Index wa = fvert[static_cast<size_t>((j + 1) % 3)];
+                                Index wb = fvert[static_cast<size_t>((j + 2) % 3)];
+                                if (wb == w) {
+                                    v = wa;
+                                } else if (wa == w) { // must reverse this face
+                                    v = wb;
+                                    std::swap(fvert[0], fvert[1]);
+                                }
+                                break;
+                            }
+                        }
+                        if (v > 0) {
+                            back--;
+                            preflower[static_cast<size_t>(back)] = v;
+                            if (utilFlag[static_cast<size_t>(v)] == 0) utilFlag[static_cast<size_t>(v)] = next_face;
+                            hit = 1;
+                            nodefaces[static_cast<size_t>(target)][static_cast<size_t>(i)] = 0; // face used
+                        }
+                    }
+                }
+            }
+        } // done with backward
+
+        // done with target: fix up its tmpflower and mark interior/bdry.
+        tmpflower[static_cast<size_t>(target)].assign(
+            preflower.begin() + back, preflower.begin() + front + 1);
+        utilFlag[static_cast<size_t>(target)] =
+            (preflower[static_cast<size_t>(back)] == preflower[static_cast<size_t>(front)]) ? -1 : -2;
+
+        // find the next vertex encountered but not yet done. (Some vertices
+        // may never be discovered at all if the triangulation is
+        // disconnected -- they simply never enter tmpflower/newIndx.)
+        target = 0;
+        for (Index v = 1; v <= top; ++v) {
+            if (utilFlag[static_cast<size_t>(v)] > 0) { target = v; break; }
+        }
+    }
+
+    // Vertices actually encountered (utilFlag<0) are renumbered
+    // contiguously from 1.
+    result.newIndx.assign(static_cast<size_t>(top) + 1, 0);
+    result.oldIndx.assign(1, 0); // index 0 unused/placeholder
+    Index tick = 0;
+    for (Index v = 1; v <= top; ++v) {
+        if (utilFlag[static_cast<size_t>(v)] < 0) {
+            tick++;
+            result.newIndx[static_cast<size_t>(v)] = tick;
+            result.oldIndx.push_back(v);
+        }
+    }
+
+    nodeCount = tick;
+    flowers.assign(static_cast<size_t>(nodeCount) + 1, {});
+    vAims.assign(static_cast<size_t>(nodeCount) + 1, 0.0);
+    Index bdryCountLocal = 0; // local count, distinct from the obj.bdryCount
+                               // that complexCount() sets below (matches the
+                               // MATLAB source's own same-named local var)
+    for (Index oldv = 1; oldv <= top; ++oldv) {
+        if (utilFlag[static_cast<size_t>(oldv)] < 0) {
+            Index v = result.newIndx[static_cast<size_t>(oldv)];
+            const auto& tf = tmpflower[static_cast<size_t>(oldv)];
+            std::vector<Index> newflower(tf.size());
+            for (size_t i = 0; i < tf.size(); ++i) {
+                newflower[i] = result.newIndx[static_cast<size_t>(tf[i])];
+            }
+            flowers[static_cast<size_t>(v)] = std::move(newflower);
+            if (utilFlag[static_cast<size_t>(oldv)] == -2) { // bdry
+                bdryCountLocal++;
+                gamma = v;
+                vAims[static_cast<size_t>(v)] = -1.0;
+            } else { // interior
+                vAims[static_cast<size_t>(v)] = kTwoPi;
+            }
+        }
+    }
+
+    // if alpha not already set (still 0, matching parse_triangles.m's
+    // isempty/==0 check -- unlike loadComplex()'s convention, a *negative*
+    // alpha here is left alone, not treated as "force auto-search"), choose
+    // a deep interior vertex far from the boundary.
+    if (alpha == 0) {
+        std::vector<Index> seeds;
+        for (Index oldv = 1; oldv <= top; ++oldv) {
+            if (utilFlag[static_cast<size_t>(oldv)] == -2) {
+                seeds.push_back(result.newIndx[static_cast<size_t>(oldv)]);
+            }
+        }
+        if (!seeds.empty()) {
+            Index a = farVert(seeds);
+            alpha = (a < 0) ? 1 : a;
+        } else { // no boundary found -- sphere
+            alpha = 1;
+        }
+    }
+
+    // organize combinatorics
+    //
+    // Bug fix vs. parse_triangles.m: see finalizeComplex()'s matching check
+    // above -- the source never checks complex_count()'s return value here
+    // either, letting a malformed complex propagate silently into
+    // indxMatrices()/layoutCenters() instead of failing cleanly right here.
+    if (complexCount() < 0) {
+        throw std::runtime_error(
+            "Packer::parseTriangles: complexCount() failed -- the generated "
+            "triangulation has a malformed boundary (see the preceding stderr "
+            "diagnostic)");
+    }
+    // Redundant with what complexCount() already does (it sets hes=Spherical
+    // itself for the no-boundary case, and cleanse() above already defaulted
+    // hes to Euclidean for every other case) -- ported anyway since it's a
+    // harmless, faithful mirror of parse_triangles.m's own explicit
+    // (equally redundant, there) statement of the same fact.
+    hes = (bdryCountLocal == 0) ? Geometry::Spherical : Geometry::Euclidean;
+
+    // 'facecount' returned to the caller is complexCount()'s own
+    // recomputation (obj.faceCount, read AFTER obj.complex_count() runs),
+    // not the raw input face count N assigned near the top of this
+    // function -- matching parse_triangles.m exactly, where the early
+    // 'obj.faceCount=N' assignment is likewise overwritten by
+    // complex_count() before 'facecount=obj.faceCount' is read out.
+    result.faceCount = faceCount;
+
+    // finish with centers/radii. Note: unlike loadComplex()/readpack(), the
+    // caller must still call indxMatrices() themselves afterward -- see the
+    // header doc comment.
+    radii.assign(static_cast<size_t>(nodeCount) + 1, 0.5);
+    localradii = radii;
+
+    centers.assign(static_cast<size_t>(nodeCount) + 1, Complex(0.0, 0.0));
+    if (cents) {
+        if (cents->size() < static_cast<size_t>(top) + 1) {
+            std::fprintf(stderr,
+                         "Packer::parseTriangles: error: given 'cents' vector is not the "
+                         "right length.\n");
+        } else {
+            for (Index v = 1; v <= nodeCount; ++v) {
+                Index j = result.oldIndx[static_cast<size_t>(v)];
+                if (j != 0) {
+                    centers[static_cast<size_t>(v)] = (*cents)[static_cast<size_t>(j)];
+                }
+            }
+        }
+    }
+    localcenters = centers;
+
+    std::fprintf(stdout, "GOpacker is ready with triangulation having %d faces\n",
+                 result.faceCount);
+
+    return result;
 }
 
 std::vector<Complex> Packer::loadTangency(const std::vector<Complex>& centersIn,
@@ -442,8 +748,17 @@ Index Packer::writepack(const std::string& fname, bool euclFlag) {
     } else {
         out << "eucl\n";
     }
+    // Modernization vs. writepack.m: the source still writes the obsolete
+    // 3-value "ALPHA/BETA/GAMMA: a 0 g" form (readpack.m's own comment
+    // already calls this "(obe: ALPHA/BETA/GAMMA)" -- obsolete -- but its
+    // writer was apparently never updated to match). readpack()/this file's
+    // own reader already accepts both the old 3-value and modern 2-value
+    // forms (see tryReadInt()'s doc comment above), so every *.p this
+    // program writes -- regardless of which form the original input file
+    // used -- should use the current "ALPHA/GAMMA: a g" convention rather
+    // than perpetuating the deprecated keyword.
     if (alpha > 0) {
-        out << "ALPHA/BETA/GAMMA: " << alpha << " " << 0 << " " << gamma << "\n";
+        out << "ALPHA/GAMMA: " << alpha << " " << gamma << "\n";
     }
     out << "FLOWERS:\n";
     for (Index k = 1; k <= nodeCount; ++k) {

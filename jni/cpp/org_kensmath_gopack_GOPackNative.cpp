@@ -6,7 +6,6 @@
 #include <jni.h>
 
 #include <string>
-#include <vector>
 
 #include "gopack/Packer.h"
 
@@ -25,6 +24,78 @@ std::string jstringToString(JNIEnv* env, jstring js) {
     env->ReleaseStringUTFChars(js, chars);
     return s;
 }
+
+#ifdef GOPACK_HAVE_RANDOM_GEN
+// Marshals a fully-riffled Packer (after a random generator + riffle() call)
+// into a new org.kensmath.gopack.RandomComplexResult, carrying everything a
+// caller needs to reconstruct the complex on the Java side (flowers) as well
+// as the resulting packing (radii/centers) -- unlike
+// computeMaximalPacking[FromComplex] above, a random generator's caller
+// doesn't already know the combinatorics, so a bare double[] of radii isn't
+// enough here (see RandomComplexResult.java for the full field rationale).
+// Returns nullptr, with a pending Java exception already thrown via
+// throwGOPackException, on failure (matching this file's other helpers).
+jobject buildRandomComplexResult(JNIEnv* env, const gopack::Packer& packer) {
+    jclass resultClass = env->FindClass("org/kensmath/gopack/RandomComplexResult");
+    if (resultClass == nullptr) {
+        throwGOPackException(env,
+            "GOPack native: org.kensmath.gopack.RandomComplexResult class not found -- is "
+            "it on the classpath?");
+        return nullptr;
+    }
+    jmethodID ctor = env->GetMethodID(resultClass, "<init>", "(I[[I[D[D[DIII[I)V");
+    if (ctor == nullptr) {
+        throwGOPackException(env,
+            "GOPack native: RandomComplexResult constructor not found (signature mismatch?)");
+        return nullptr;
+    }
+
+    const jsize n = static_cast<jsize>(packer.nodeCount) + 1;
+
+    // flowers: 1-indexed jagged int[][], flowers[0] left as an empty (not
+    // null) int[] placeholder so a naive 0..nodeCount Java-side loop can't
+    // NPE on it.
+    jclass intArrayClass = env->FindClass("[I");
+    jobjectArray flowersArr = env->NewObjectArray(n, intArrayClass, nullptr);
+    for (jsize v = 0; v < n; ++v) {
+        static const std::vector<gopack::Index> kEmpty;
+        const std::vector<gopack::Index>& petals =
+            (v == 0) ? kEmpty : packer.flowers[static_cast<size_t>(v)];
+        jintArray row = env->NewIntArray(static_cast<jsize>(petals.size()));
+        if (!petals.empty()) {
+            env->SetIntArrayRegion(row, 0, static_cast<jsize>(petals.size()), petals.data());
+        }
+        env->SetObjectArrayElement(flowersArr, v, row);
+        env->DeleteLocalRef(row);
+    }
+
+    jdoubleArray radiiArr = env->NewDoubleArray(n);
+    env->SetDoubleArrayRegion(radiiArr, 0, n, packer.radii.data());
+
+    // packer.centers is std::vector<std::complex<double>> -- split into
+    // parallel re/im double[] arrays, since JNI has no complex type.
+    std::vector<jdouble> re(static_cast<size_t>(n)), im(static_cast<size_t>(n));
+    for (jsize v = 0; v < n; ++v) {
+        re[static_cast<size_t>(v)] = packer.centers[static_cast<size_t>(v)].real();
+        im[static_cast<size_t>(v)] = packer.centers[static_cast<size_t>(v)].imag();
+    }
+    jdoubleArray centersReArr = env->NewDoubleArray(n);
+    env->SetDoubleArrayRegion(centersReArr, 0, n, re.data());
+    jdoubleArray centersImArr = env->NewDoubleArray(n);
+    env->SetDoubleArrayRegion(centersImArr, 0, n, im.data());
+
+    jintArray cornersArr = env->NewIntArray(static_cast<jsize>(packer.corners.size()));
+    if (!packer.corners.empty()) {
+        env->SetIntArrayRegion(cornersArr, 0, static_cast<jsize>(packer.corners.size()),
+                                packer.corners.data());
+    }
+
+    return env->NewObject(resultClass, ctor, static_cast<jint>(packer.nodeCount), flowersArr,
+                           radiiArr, centersReArr, centersImArr,
+                           static_cast<jint>(packer.hes), static_cast<jint>(packer.alpha),
+                           static_cast<jint>(packer.gamma), cornersArr);
+}
+#endif // GOPACK_HAVE_RANDOM_GEN
 
 } // namespace
 
@@ -46,10 +117,6 @@ extern "C" {
 // eventual configurable stopping criterion, but the current port uses
 // GOPack's fixed 0.01 visual-error cutoff (continueRiffle.m's 'cutval'); a
 // future pass can thread a real tolerance through once that's wired up.
-//
-// This entry point is radii-only (no centers). See
-// computeMaximalPackingFromComplex below for the in-memory counterpart,
-// which returns both.
 JNIEXPORT jdoubleArray JNICALL
 Java_org_kensmath_gopack_GOPackNative_computeMaximalPacking(
     JNIEnv* env, jclass /*clazz*/, jstring inputPath, jint /*geometryHint*/,
@@ -68,7 +135,12 @@ Java_org_kensmath_gopack_GOPackNative_computeMaximalPacking(
             return nullptr;
         }
 
-        gopack::RiffleResult result = packer.riffle(maxPasses > 0 ? maxPasses : 20);
+        // 200, not the old 20, matching cli/main.cpp's own default -- 20 was
+        // found to under-converge small/irregular random triangulations (see
+        // that file's comment); continueRiffle() exits early on convergence
+        // regardless, so a higher cap costs nothing for inputs that finish
+        // sooner.
+        gopack::RiffleResult result = packer.riffle(maxPasses > 0 ? maxPasses : 200);
         if (result.cycles < 0) {
             throwGOPackException(env, "GOPack native: riffle failed");
             return nullptr;
@@ -92,7 +164,7 @@ Java_org_kensmath_gopack_GOPackNative_computeMaximalPacking(
     }
 }
 
-// double[][] computeMaximalPackingFromComplex(int nodeCount, int[][] flowers,
+// double[] computeMaximalPackingFromComplex(int nodeCount, int[][] flowers,
 // int geometry, double tolerance, int maxPasses)
 //
 // The in-memory counterpart to computeMaximalPacking above: takes a
@@ -110,24 +182,9 @@ Java_org_kensmath_gopack_GOPackNative_computeMaximalPacking(
 // geometry: 0 = Euclidean, -1 = Hyperbolic, +1 = Spherical (matches
 // gopack::Geometry's own underlying values, and GOPack's GEOMETRY: file
 // field).
-//
-// Returns a 3-row double[][], each row of length nodeCount+1 (1-indexed,
-// index 0 unused), in the same convention as computeMaximalPacking's radii:
-//   result[0] -- radii
-//   result[1] -- center real parts
-//   result[2] -- center imaginary parts
-// Unlike computeMaximalPacking, this entry point returns centers as well as
-// radii, since GOPack computes both together (riffle() populates
-// packer.centers via reapResults() as part of producing a valid packing --
-// there's no extra computation here, only marshalling). These are GOPack's
-// internal working values: per the module comment in Packer.h, GOPack
-// always computes in euclidean coordinates regardless of 'geometry' --
-// 'geometry' is not applied to convert radii/centers to a hyperbolic or
-// spherical model here (that conversion, geom::eToHData/eToSData, only
-// happens in writepack() on the C++ side, which this bridge does not call).
-// A caller reading back a hyperbolic or spherical packing is responsible
-// for applying whatever conversion its own geometry model requires.
-JNIEXPORT jobjectArray JNICALL
+// Returns radii in the same nodeCount+1-length, 1-indexed convention as
+// computeMaximalPacking.
+JNIEXPORT jdoubleArray JNICALL
 Java_org_kensmath_gopack_GOPackNative_computeMaximalPackingFromComplex(
     JNIEnv* env, jclass /*clazz*/, jint nodeCount, jobjectArray flowers, jint geometry,
     jdouble /*tolerance*/, jint maxPasses) {
@@ -175,57 +232,146 @@ Java_org_kensmath_gopack_GOPackNative_computeMaximalPackingFromComplex(
             return nullptr;
         }
 
-        gopack::RiffleResult result = packer.riffle(maxPasses > 0 ? maxPasses : 20);
+        // 200, not the old 20, matching cli/main.cpp's own default -- 20 was
+        // found to under-converge small/irregular random triangulations (see
+        // that file's comment); continueRiffle() exits early on convergence
+        // regardless, so a higher cap costs nothing for inputs that finish
+        // sooner.
+        gopack::RiffleResult result = packer.riffle(maxPasses > 0 ? maxPasses : 200);
         if (result.cycles < 0) {
             throwGOPackException(env, "GOPack native: riffle failed");
             return nullptr;
         }
 
-        // packer.centers is already populated here -- riffle() calls
-        // reapResults() internally (centers = localcenters; radii =
-        // localradii;) -- so this is pure marshalling, no extra computation.
         const jsize n = static_cast<jsize>(packer.nodeCount) + 1;
-
-        std::vector<jdouble> centerX(static_cast<size_t>(n));
-        std::vector<jdouble> centerY(static_cast<size_t>(n));
-        for (jsize v = 0; v < n; ++v) {
-            const gopack::Complex& c = packer.centers[static_cast<size_t>(v)];
-            centerX[static_cast<size_t>(v)] = c.real();
-            centerY[static_cast<size_t>(v)] = c.imag();
-        }
-
-        jclass doubleArrayClass = env->FindClass("[D");
-        if (doubleArrayClass == nullptr) {
-            throwGOPackException(env, "Failed to find double[] class");
-            return nullptr;
-        }
-        jobjectArray out = env->NewObjectArray(3, doubleArrayClass, nullptr);
+        jdoubleArray out = env->NewDoubleArray(n);
         if (out == nullptr) {
             throwGOPackException(env, "Failed to allocate result array");
             return nullptr;
         }
-
-        jdoubleArray radiiOut = env->NewDoubleArray(n);
-        jdoubleArray centerXOut = env->NewDoubleArray(n);
-        jdoubleArray centerYOut = env->NewDoubleArray(n);
-        if (radiiOut == nullptr || centerXOut == nullptr || centerYOut == nullptr) {
-            throwGOPackException(env, "Failed to allocate result row array");
-            return nullptr;
-        }
-        env->SetDoubleArrayRegion(radiiOut, 0, n, packer.radii.data());
-        env->SetDoubleArrayRegion(centerXOut, 0, n, centerX.data());
-        env->SetDoubleArrayRegion(centerYOut, 0, n, centerY.data());
-
-        env->SetObjectArrayElement(out, 0, radiiOut);
-        env->SetObjectArrayElement(out, 1, centerXOut);
-        env->SetObjectArrayElement(out, 2, centerYOut);
-
+        env->SetDoubleArrayRegion(out, 0, n, packer.radii.data());
         return out;
     } catch (const std::exception& e) {
         throwGOPackException(env, e.what());
         return nullptr;
     }
 }
+
+#ifdef GOPACK_HAVE_RANDOM_GEN
+// RandomComplexResult computeRandomTri(int intN, int bdryN, double[] graphXY,
+//     double centX, double centY, boolean hasCent, int maxPasses)
+//
+// Bridges Packer::randomTri(intN, bdryN, graph, cent) -- a random
+// triangulation of an ARBITRARY closed polygonal region, not just a fixed
+// disc/square/rectangle -- so CirclePack can hand it a user-drawn boundary
+// and get back a full ready-to-render complex. See
+// RandomComplexResult.java and this file's computeRandomTri Javadoc
+// counterpart in GOPackNative.java for the full field semantics.
+//
+// graphXY: flat x,y coordinate list for the closed boundary polygon (do not
+// repeat the first point at the end); must have an even length of at least
+// 6 (i.e. at least 3 points).
+JNIEXPORT jobject JNICALL
+Java_org_kensmath_gopack_GOPackNative_computeRandomTri(
+    JNIEnv* env, jclass /*clazz*/, jint intN, jint bdryN, jdoubleArray graphXY, jdouble centX,
+    jdouble centY, jboolean hasCent, jint maxPasses) {
+
+    try {
+        const jsize flatLen = env->GetArrayLength(graphXY);
+        if (flatLen < 6 || (flatLen % 2) != 0) {
+            throwGOPackException(env,
+                "GOPack native: graphXY must hold at least 3 (x,y) points and have an even "
+                "length");
+            return nullptr;
+        }
+        jdouble* flat = env->GetDoubleArrayElements(graphXY, nullptr);
+        std::vector<gopack::Complex> graph;
+        graph.reserve(static_cast<size_t>(flatLen) / 2);
+        for (jsize i = 0; i + 1 < flatLen; i += 2) {
+            graph.emplace_back(flat[i], flat[i + 1]);
+        }
+        env->ReleaseDoubleArrayElements(graphXY, flat, JNI_ABORT);
+
+        gopack::Complex cent(centX, centY);
+        gopack::Packer packer = gopack::Packer::randomTri(
+            static_cast<gopack::Index>(intN), static_cast<gopack::Index>(bdryN), graph,
+            hasCent ? &cent : nullptr);
+        if (packer.nodeCount <= 0) {
+            throwGOPackException(env,
+                "GOPack native: randomTri failed to produce a usable complex (bad graph, or "
+                "intN/bdryN too small -- see stderr)");
+            return nullptr;
+        }
+        // randomTri() leaves mode at its Packer()-default of 1 (max-pack)
+        // but does NOT itself call setMode() -- unlike randomRectangle()/
+        // randomSquare(), which already call setMode(2, ...) internally --
+        // so vAims (riffle()'s target angle sums) still needs to be
+        // populated here, exactly as cli/main.cpp's own --random-tri
+        // handling and the two bridges above already do for their sources.
+        if (packer.setMode(1) < 0) {
+            throwGOPackException(env, "GOPack native: failed to set max-pack mode");
+            return nullptr;
+        }
+
+        gopack::RiffleResult result = packer.riffle(maxPasses > 0 ? maxPasses : 200);
+        if (result.cycles < 0) {
+            throwGOPackException(env, "GOPack native: riffle failed");
+            return nullptr;
+        }
+
+        return buildRandomComplexResult(env, packer);
+    } catch (const std::exception& e) {
+        throwGOPackException(env, e.what());
+        return nullptr;
+    }
+}
+#endif // GOPACK_HAVE_RANDOM_GEN
+
+#ifdef GOPACK_HAVE_RANDOM_GEN
+// RandomComplexResult computeRandomDisc(int n, int maxPasses)
+//
+// Bridges Packer::randomDisc(N) -- a random triangulation of the unit disc,
+// set up for hyperbolic maximal packing -- so CirclePack can generate a
+// fresh random disc packing without round-tripping through a *.p file. See
+// RandomComplexResult.java and this file's computeRandomDisc Javadoc
+// counterpart in GOPackNative.java for the full field semantics.
+JNIEXPORT jobject JNICALL
+Java_org_kensmath_gopack_GOPackNative_computeRandomDisc(
+    JNIEnv* env, jclass /*clazz*/, jint n, jint maxPasses) {
+
+    try {
+        gopack::Packer packer = gopack::Packer::randomDisc(static_cast<gopack::Index>(n));
+        if (packer.nodeCount <= 0) {
+            throwGOPackException(env,
+                "GOPack native: randomDisc failed to produce a usable complex (n too small? "
+                "-- see stderr)");
+            return nullptr;
+        }
+        // randomDisc() sets hes=Hyperbolic and mode=1 directly on the struct
+        // but, like randomTri(), does NOT itself call setMode() -- so vAims
+        // (riffle()'s target angle sums) still needs to be populated here.
+        // (randomSquare()/randomRectangle() are the ones that already call
+        // setMode(2, ...) internally -- calling setMode(1) on those would be
+        // wrong; randomDisc() is not one of those, confirmed directly in
+        // core/src/PackerRandom.cpp.)
+        if (packer.setMode(1) < 0) {
+            throwGOPackException(env, "GOPack native: failed to set max-pack mode");
+            return nullptr;
+        }
+
+        gopack::RiffleResult result = packer.riffle(maxPasses > 0 ? maxPasses : 200);
+        if (result.cycles < 0) {
+            throwGOPackException(env, "GOPack native: riffle failed");
+            return nullptr;
+        }
+
+        return buildRandomComplexResult(env, packer);
+    } catch (const std::exception& e) {
+        throwGOPackException(env, e.what());
+        return nullptr;
+    }
+}
+#endif // GOPACK_HAVE_RANDOM_GEN
 
 JNIEXPORT jstring JNICALL
 Java_org_kensmath_gopack_GOPackNative_nativeVersion(JNIEnv* env, jclass /*clazz*/) {

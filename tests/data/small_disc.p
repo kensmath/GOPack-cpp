@@ -1,13 +1,13 @@
 NODECOUNT: 7
 GEOMETRY: eucl
-ALPHA/BETA/GAMMA: 1 0 2
+ALPHA/GAMMA: 1 2
 FLOWERS:
 1 6   2 3 4 5 6 7 2
-2 2   7 1 3
-3 2   2 1 4
-4 2   3 1 5
-5 2   4 1 6
-6 2   5 1 7
-7 2   6 1 2
+2 2   3 1 7
+3 2   4 1 2
+4 2   5 1 3
+5 2   6 1 4
+6 2   7 1 5
+7 2   2 1 6
 
 END

@@ -842,6 +842,36 @@ RiffleResult Packer::riffle(int passNum) {
 void Packer::reapResults() {
     centers = localcenters;
     radii = localradii;
+
+    // Spherical packings: recenter so the tangency-point centroid sits at
+    // the origin in 3D (the same affine-normalization affineNormalizer/
+    // centroid in Geometry.cpp compute), rather than leaving the packing
+    // wherever alpha's fixed euclidean-origin placement happens to land
+    // once eToSData projects it onto the sphere. This used to happen only
+    // inside writepack()'s Spherical branch, which meant it silently
+    // depended on going through writepack() to get a well-centered result:
+    // any caller reading Packer::centers/radii directly after riffle() --
+    // in particular the JNI bridge's computeMaximalPackingFromComplex,
+    // which never calls writepack() at all -- got the un-normalized,
+    // possibly lopsided placement instead. Doing it here means every
+    // caller gets a normalized packing for free. writepack() (PackerIO.cpp)
+    // deliberately still does its own affineNormalizer call too, as a
+    // defensive no-op for a caller that writes a Spherical packing without
+    // riffling it first (so this step never ran) -- affineNormalizer is
+    // idempotent on an already-centered input (its very first check is
+    // already within tolerance, so it returns the identity transform
+    // immediately), so that redundancy costs one cheap extra pass on the
+    // normal riffle-then-write path, not real duplicated work. Hyperbolic
+    // has no equivalent step: writepack()'s Hyperbolic branch is a plain
+    // per-vertex eToHData conversion with no affine pre-step to move.
+    if (hes == Geometry::Spherical) {
+        std::vector<Complex> T = loadTangency(centers, radii);
+        auto [A, B] = geom::affineNormalizer(T);
+        for (Index v = 1; v <= nodeCount; ++v) {
+            centers[v] = A * centers[v] + B;
+            radii[v] = A * radii[v];
+        }
+    }
 }
 
 std::vector<Scalar> Packer::visualErrors() const {

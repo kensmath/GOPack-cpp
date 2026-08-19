@@ -14,7 +14,7 @@ if(NOT JNI_FOUND)
 endif()
 
 add_library(gopack_jni SHARED
-    org_kensmath_gopack_GOPackNative.cpp
+    JNI_GOPackNative.cpp
 )
 
 target_include_directories(gopack_jni PRIVATE ${JNI_INCLUDE_DIRS})

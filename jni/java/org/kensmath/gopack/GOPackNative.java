@@ -37,9 +37,6 @@ public final class GOPackNative {
      * but not yet wired up to a JNI entry point -- the CLI's {@code
      * --polygon} flag is the only way to reach it today.
      *
-     * <p>Radii only (no centers) -- see {@link #computeMaximalPackingFromComplex}
-     * for the in-memory counterpart, which returns both.
-     *
      * @param inputPath  path to a *.p triangulation/packing file
      * @param geometryHint reserved for future use (currently ignored --
      *                     geometry is read from the file's GEOMETRY: field);
@@ -47,7 +44,10 @@ public final class GOPackNative {
      * @param tolerance    reserved for future use (currently ignored -- the
      *                     port uses GOPack's fixed 0.01 visual-error cutoff);
      *                     pass 0.0
-     * @param maxPasses    upper bound on riffle passes (GOPack default is 20)
+     * @param maxPasses    upper bound on riffle passes (pass &lt;= 0 to use the
+     *                      native default of 200; see continueRiffle's own
+     *                      early-exit-on-convergence behavior -- a higher cap
+     *                      costs nothing for inputs that converge sooner)
      * @return euclidean radii for every vertex, as an array of length
      *         nodeCount+1 where index v holds vertex v's radius for
      *         v = 1..nodeCount (matching GOPack/CirclePack's own 1-indexed
@@ -84,31 +84,92 @@ public final class GOPackNative {
      * @param tolerance reserved for future use (currently ignored -- the
      *                  port uses GOPack's fixed 0.01 visual-error cutoff);
      *                  pass 0.0
-     * @param maxPasses upper bound on riffle passes (GOPack default is 20)
-     * @return a 3-row {@code double[][]}, each row of length {@code
-     *         nodeCount+1} (1-indexed, index 0 unused), matching {@link
-     *         #computeMaximalPacking}'s indexing convention:
-     *         <ul>
-     *           <li>{@code result[0]} -- radii</li>
-     *           <li>{@code result[1]} -- center real parts</li>
-     *           <li>{@code result[2]} -- center imaginary parts</li>
-     *         </ul>
-     *         Unlike {@link #computeMaximalPacking}, this returns centers as
-     *         well as radii, since GOPack computes both together as part of
-     *         producing a valid packing. These are GOPack's internal working
-     *         values: per {@code core/include/gopack/Packer.h}, GOPack always
-     *         computes in euclidean coordinates regardless of {@code
-     *         geometry} -- no hyperbolic/spherical conversion (the
-     *         {@code eToHData}/{@code eToSData} logic in {@code writepack()})
-     *         is applied before these are returned. A caller reading back a
-     *         hyperbolic or spherical packing is responsible for applying
-     *         whatever conversion its own geometry model requires. Throws
-     *         {@link GOPackException} if the native call fails (e.g. a
-     *         malformed complex -- wrong array lengths, no interior vertex,
-     *         etc.).
+     * @param maxPasses upper bound on riffle passes (pass &lt;= 0 to use the
+     *                  native default of 200)
+     * @return euclidean radii for every vertex, in the same {@code
+     *         nodeCount+1}-length, 1-indexed convention as {@link
+     *         #computeMaximalPacking}. Throws {@link GOPackException} if the
+     *         native call fails (e.g. a malformed complex -- wrong array
+     *         lengths, no interior vertex, etc.).
      */
-    public static native double[][] computeMaximalPackingFromComplex(
+    public static native double[] computeMaximalPackingFromComplex(
             int nodeCount, int[][] flowers, int geometry, double tolerance, int maxPasses)
+            throws GOPackException;
+
+    /**
+     * Generates a random triangulation of an arbitrary closed polygonal
+     * region -- not just a fixed disc/square/rectangle -- and computes a
+     * maximal packing of it. This is the JNI bridge to
+     * {@code gopack::Packer::randomTri(intN, bdryN, graph, cent)}
+     * (see {@code core/include/gopack/Packer.h}); the CLI's {@code
+     * --random-tri} flag is the other way to reach the same native code.
+     *
+     * <p>Unlike {@link #computeMaximalPacking}/{@link
+     * #computeMaximalPackingFromComplex}, the caller doesn't already know
+     * the combinatorics here -- the generator invents them from a Delaunay
+     * triangulation of randomly placed points inside {@code graphXY} -- so
+     * this returns a {@link RandomComplexResult} (flowers + radii + centers
+     * + bookkeeping), not a bare {@code double[]} of radii.
+     *
+     * <p>The result stays in max-pack mode (mode 1): this generic region has
+     * no "corners" concept the way a rectangle does, so {@link
+     * RandomComplexResult#corners} is always empty here.
+     *
+     * @param intN      number of interior points to generate
+     * @param bdryN     number of boundary points to generate
+     * @param graphXY   the closed boundary polygon's vertices, as a flat
+     *                  x0,y0,x1,y1,... coordinate list (do not repeat the
+     *                  first point at the end); length must be even and at
+     *                  least 6 (i.e. at least 3 points)
+     * @param centX     x coordinate of an optional point inside {@code
+     *                  graphXY} to use as the packing's alpha (centering)
+     *                  vertex; ignored unless {@code hasCent} is true
+     * @param centY     y coordinate of that optional point; ignored unless
+     *                  {@code hasCent} is true
+     * @param hasCent   whether {@code centX}/{@code centY} should be used;
+     *                  pass false to let GOPack choose alpha automatically
+     *                  (matching {@code Packer::randomTri()}'s {@code
+     *                  cent=nullptr} default) -- also the fallback if the
+     *                  given point doesn't actually land inside {@code
+     *                  graphXY}
+     * @param maxPasses upper bound on riffle passes (pass &lt;= 0 to use the
+     *                  native default of 200)
+     * @return the generated complex and its computed packing. Throws
+     *         {@link GOPackException} if generation fails (e.g. {@code
+     *         graphXY} too short/degenerate, {@code intN}/{@code bdryN} too
+     *         small to produce a usable complex) or riffle fails.
+     */
+    public static native RandomComplexResult computeRandomTri(
+            int intN, int bdryN, double[] graphXY, double centX, double centY, boolean hasCent,
+            int maxPasses) throws GOPackException;
+
+    /**
+     * Generates a random triangulation of the unit disc and computes its
+     * maximal (hyperbolic) packing. This is the JNI bridge to {@code
+     * gopack::Packer::randomDisc(N)} (see {@code core/include/gopack/Packer.h});
+     * the CLI's {@code --random-disc} flag is the other way to reach the same
+     * native code.
+     *
+     * <p>Like {@link #computeRandomTri}, the caller doesn't already know the
+     * combinatorics -- the generator invents them from a Delaunay
+     * triangulation of randomly placed points in the unit disc -- so this
+     * returns a {@link RandomComplexResult} (flowers + radii + centers +
+     * bookkeeping), not a bare {@code double[]} of radii. The result's {@link
+     * RandomComplexResult#geometry} is always Hyperbolic ({@code -1}), and
+     * {@link RandomComplexResult#corners} is always empty (the disc has no
+     * polygonal corners the way a rectangle does).
+     *
+     * @param n         total number of points (interior + boundary) to
+     *                  generate; {@code Packer::randomDisc} splits this
+     *                  automatically into roughly {@code sqrt(n)} boundary
+     *                  points and the rest interior
+     * @param maxPasses upper bound on riffle passes (pass &lt;= 0 to use the
+     *                  native default of 200)
+     * @return the generated complex and its computed hyperbolic packing.
+     *         Throws {@link GOPackException} if generation fails (e.g. {@code
+     *         n} too small to produce a usable complex) or riffle fails.
+     */
+    public static native RandomComplexResult computeRandomDisc(int n, int maxPasses)
             throws GOPackException;
 
     /** Returns the linked native library's version string, for diagnostics. */
