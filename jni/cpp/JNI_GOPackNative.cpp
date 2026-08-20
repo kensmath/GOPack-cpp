@@ -165,7 +165,7 @@ Java_JNI_GOPackNative_computeMaximalPacking(
     }
 }
 
-// double[] computeMaximalPackingFromComplex(int nodeCount, int[][] flowers,
+// double[][] computeMaximalPackingFromComplex(int nodeCount, int[][] flowers,
 // int geometry, double tolerance, int maxPasses)
 //
 // The in-memory counterpart to computeMaximalPacking above: takes a
@@ -183,9 +183,28 @@ Java_JNI_GOPackNative_computeMaximalPacking(
 // geometry: 0 = Euclidean, -1 = Hyperbolic, +1 = Spherical (matches
 // gopack::Geometry's own underlying values, and GOPack's GEOMETRY: file
 // field).
-// Returns radii in the same nodeCount+1-length, 1-indexed convention as
-// computeMaximalPacking.
-JNIEXPORT jdoubleArray JNICALL
+//
+// Returns a 3-row double[][], each row of length nodeCount+1 (1-indexed,
+// index 0 unused), matching GOPackNative.java's documented contract:
+//   result[0] -- radii
+//   result[1] -- center real parts
+//   result[2] -- center imaginary parts
+// IMPORTANT: this MUST stay a jobjectArray of 3 jdoubleArrays, matching the
+// Java side's "public static native double[][] ..." declaration exactly.
+// JNI resolves/links native methods purely by name+argument-descriptor --
+// it does NOT check the native function's actual return type against the
+// declared Java return type. A JNIEXPORT here that instead returned a bare
+// jdoubleArray (as an earlier version of this function mistakenly did)
+// would still link and run without any JNI-level error, but the JVM
+// interpreter -- trusting the *Java-declared* double[][] type -- would
+// execute result[0]/result[1]/result[2] as aaload (reference-array) reads
+// against what is actually raw double payload data, reinterpreting radius/
+// center bits as compressed-oop pointers. That is a real regression this
+// project hit once already (see git history around the HypPacker.maxPack
+// EXCEPTION_ACCESS_VIOLATION crash, N=10000): the corrupted "pointer" was
+// literally the high 32 bits of an ordinary ~0.5 radius value. Do not
+// "simplify" this back to a flat jdoubleArray.
+JNIEXPORT jobjectArray JNICALL
 Java_JNI_GOPackNative_computeMaximalPackingFromComplex(
     JNIEnv* env, jclass /*clazz*/, jint nodeCount, jobjectArray flowers, jint geometry,
     jdouble /*tolerance*/, jint maxPasses) {
@@ -244,13 +263,46 @@ Java_JNI_GOPackNative_computeMaximalPackingFromComplex(
             return nullptr;
         }
 
+        // packer.centers is std::vector<std::complex<double>> -- JNI has no
+        // complex type, so split into parallel re/im double[] rows (same
+        // approach buildRandomComplexResult() uses below for the random
+        // generators' RandomComplexResult.centersRe/centersIm fields).
         const jsize n = static_cast<jsize>(packer.nodeCount) + 1;
-        jdoubleArray out = env->NewDoubleArray(n);
+
+        jdoubleArray radiiArr = env->NewDoubleArray(n);
+        if (radiiArr == nullptr) {
+            throwGOPackException(env, "Failed to allocate radii result array");
+            return nullptr;
+        }
+        env->SetDoubleArrayRegion(radiiArr, 0, n, packer.radii.data());
+
+        std::vector<jdouble> re(static_cast<size_t>(n)), im(static_cast<size_t>(n));
+        for (jsize v = 0; v < n; ++v) {
+            re[static_cast<size_t>(v)] = packer.centers[static_cast<size_t>(v)].real();
+            im[static_cast<size_t>(v)] = packer.centers[static_cast<size_t>(v)].imag();
+        }
+        jdoubleArray centerXArr = env->NewDoubleArray(n);
+        jdoubleArray centerYArr = env->NewDoubleArray(n);
+        if (centerXArr == nullptr || centerYArr == nullptr) {
+            throwGOPackException(env, "Failed to allocate centers result array");
+            return nullptr;
+        }
+        env->SetDoubleArrayRegion(centerXArr, 0, n, re.data());
+        env->SetDoubleArrayRegion(centerYArr, 0, n, im.data());
+
+        jclass doubleArrayClass = env->FindClass("[D");
+        if (doubleArrayClass == nullptr) {
+            throwGOPackException(env, "GOPack native: [D class not found");
+            return nullptr;
+        }
+        jobjectArray out = env->NewObjectArray(3, doubleArrayClass, nullptr);
         if (out == nullptr) {
             throwGOPackException(env, "Failed to allocate result array");
             return nullptr;
         }
-        env->SetDoubleArrayRegion(out, 0, n, packer.radii.data());
+        env->SetObjectArrayElement(out, 0, radiiArr);
+        env->SetObjectArrayElement(out, 1, centerXArr);
+        env->SetObjectArrayElement(out, 2, centerYArr);
         return out;
     } catch (const std::exception& e) {
         throwGOPackException(env, e.what());
