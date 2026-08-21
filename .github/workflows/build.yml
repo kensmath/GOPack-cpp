@@ -74,3 +74,62 @@ jobs:
           name: gopack-cpp-${{ matrix.name }}
           path: dist/
           if-no-files-found: warn
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build inside an old-glibc container (manylinux2014 = CentOS 7,
+      # glibc 2.17 -- the same baseline the Python packaging ecosystem uses
+      # so a wheel/.so "runs on every mainstream Linux from the last
+      # decade") rather than directly on the ubuntu-latest host, whose own
+      # glibc is much newer than most users' actual machines: a .so linked
+      # against that would refuse to load elsewhere with a
+      # "version `GLIBC_2.3x' not found" error. This step wraps only the
+      # configure/build/test commands in `docker run`, not the whole job
+      # (i.e. not GitHub Actions' own `container:` key) -- manylinux2014's
+      # glibc is too old to run the Node.js runtime GitHub's own actions
+      # (checkout/upload-artifact) need, so those stay on the normal
+      # ubuntu-latest host and only the actual compilation happens inside
+      # the old image. `ls /opt/rh` is printed before enabling a devtoolset
+      # purely as a diagnostic: if the exact devtoolset version below ever
+      # stops existing in the upstream image, the log shows what's actually
+      # available instead of just failing with "no such file or directory".
+      - name: Configure, build, and test inside manylinux2014 (old-glibc baseline)
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work \
+            quay.io/pypa/manylinux2014_x86_64 \
+            bash -c '
+              set -e
+              yum install -y -q git make java-11-openjdk-devel
+              ls /opt/rh
+              source /opt/rh/devtoolset-10/enable
+              gcc --version
+              curl -fsSL -o /tmp/cmake.tar.gz \
+                https://github.com/Kitware/CMake/releases/download/v3.28.3/cmake-3.28.3-linux-x86_64.tar.gz
+              tar -xzf /tmp/cmake.tar.gz -C /opt
+              export PATH="/opt/cmake-3.28.3-linux-x86_64/bin:$PATH"
+              cmake --version
+              export JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+              echo "JAVA_HOME=$JAVA_HOME"
+              cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+              cmake --build build --config Release --parallel
+              ctest --test-dir build -C Release --output-on-failure
+              chown -R "$(stat -c "%u:%g" /work)" /work/build
+            '
+
+      - name: Package artifacts (Linux)
+        run: |
+          mkdir -p dist
+          cp build/cli/gopack dist/ || true
+          cp build/jni/cpp/libgopack_jni.so dist/ || true
+          file dist/* || true
+        continue-on-error: true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gopack-cpp-linux-x64
+          path: dist/
+          if-no-files-found: warn

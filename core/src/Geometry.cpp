@@ -249,9 +249,6 @@ std::pair<Complex, Scalar> sToEData(Complex sz, Scalar sr) {
     if ((phi + sr) >= (kPi + kTol)) {
         sr = kPi - sr;
         V = {-V[0], -V[1], -V[2]};
-        // NOTE: the original MATLAB calls the undefined function
-        // 'proj_vec_to_sph' here (a typo for proj_vec_to_s); we call the
-        // real function, which is clearly the intent.
         sz = geom::projVecToS(V);
         flipflag = -1.0;
     }

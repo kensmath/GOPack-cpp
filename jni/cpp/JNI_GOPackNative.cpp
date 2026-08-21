@@ -310,6 +310,210 @@ Java_JNI_GOPackNative_computeMaximalPackingFromComplex(
     }
 }
 
+// double[][] computePolygonalPackingFromComplex(int nodeCount, int[][] flowers,
+// int geometry, int[] corners, double[] angles, int maxPasses)
+//
+// Polygonal/rectangle packing (mode 2) counterpart to
+// computeMaximalPackingFromComplex above: loads a triangulation already held
+// in memory (same flowers/geometry convention as that method -- see its own
+// comment), then instead of maximal-packing mode, sets polygonal mode via
+// Packer::setMode(2, corners, angles) before riffling. See setMode()'s doc
+// comment in Packer.h for the authoritative corner/angle semantics; the
+// short version:
+//
+// corners: 1-indexed boundary vertices to use as polygon corners, in
+// counterclockwise order. Pass null or a 0-length array to let GOPack infer/
+// choose corners automatically (mirrors Packer::setMode's own crns={}
+// default -- "figure out the corners for me").
+//
+// angles: target corner angles as MULTIPLES OF PI (the same convention
+// CirclePack's own set_aim command uses -- e.g. pass 0.5 for a right angle,
+// NOT Math.PI/2.0 -- chosen for consistency with that command and because
+// it's the easier convention for interactive/user input), matching corners
+// in count and order. This bridge converts to radians internally before
+// calling Packer::setMode(), which itself works in radians. Pass null or a
+// 0-length array for automatic equal angles (e.g. 0.5 each for a 4-corner
+// rectangle -- setMode's own default). Must be empty whenever corners is
+// empty; passing angles without corners is rejected, since there'd be no
+// way to say which angle belongs to which (as-yet-unchosen) corner. The
+// angles must be consistent with the polygon's turning-angle requirement
+// (sum of (1 - angle) over all corners == 2, i.e. in radians sum of
+// (pi - angle) == 2*pi); setMode() itself validates this (in radians, after
+// this bridge's conversion) and this bridge surfaces that failure as a
+// GOPackException rather than silently producing a bad packing.
+//
+// NOTE: entering mode 2 always resets the packing's internal geometry to
+// Euclidean, regardless of the 'geometry' passed in here (a deliberate
+// GOPack behavior -- see setMode()'s own .cpp comment) -- polygonal
+// packings are inherently planar.
+//
+// Returns a 4-row double[][], each row of length nodeCount+1 (1-indexed,
+// index 0 unused):
+//   result[0] -- radii
+//   result[1] -- center real parts
+//   result[2] -- center imaginary parts
+//   result[3] -- the actual corner vertices used, as doubles (exact for the
+//                small integers involved) -- this is what you gave in
+//                'corners' when non-empty, or GOPack's own automatic choice
+//                when 'corners' was null/empty; length == number of
+//                corners actually used (NOT nodeCount+1 like the other three
+//                rows -- check its length rather than assuming 4).
+JNIEXPORT jobjectArray JNICALL
+Java_JNI_GOPackNative_computePolygonalPackingFromComplex(
+    JNIEnv* env, jclass /*clazz*/, jint nodeCount, jobjectArray flowers, jint geometry,
+    jintArray corners, jdoubleArray angles, jint maxPasses) {
+
+    try {
+        if (nodeCount <= 0) {
+            throwGOPackException(env, "GOPack native: nodeCount must be positive");
+            return nullptr;
+        }
+        const jsize expectedLen = static_cast<jsize>(nodeCount) + 1;
+        if (env->GetArrayLength(flowers) != expectedLen) {
+            throwGOPackException(env,
+                "GOPack native: flowers.length must be nodeCount+1 (index 0 unused)");
+            return nullptr;
+        }
+
+        std::vector<std::vector<gopack::Index>> flowersIn(static_cast<size_t>(expectedLen));
+        for (jsize v = 1; v < expectedLen; ++v) {
+            jobject rowObj = env->GetObjectArrayElement(flowers, v);
+            if (rowObj == nullptr) {
+                throwGOPackException(env,
+                    "GOPack native: flowers[v] must not be null for v=1..nodeCount");
+                return nullptr;
+            }
+            jintArray row = static_cast<jintArray>(rowObj);
+            jsize rowLen = env->GetArrayLength(row);
+            jint* rowData = env->GetIntArrayElements(row, nullptr);
+            std::vector<gopack::Index> flower(rowData, rowData + rowLen);
+            env->ReleaseIntArrayElements(row, rowData, JNI_ABORT);
+            env->DeleteLocalRef(rowObj);
+            flowersIn[static_cast<size_t>(v)] = std::move(flower);
+        }
+
+        gopack::Packer packer;
+        gopack::Index loaded = packer.loadComplex(static_cast<gopack::Index>(nodeCount),
+                                                    flowersIn,
+                                                    static_cast<gopack::Geometry>(geometry));
+        if (loaded <= 0) {
+            throwGOPackException(env,
+                "GOPack native: loadComplex failed (invalid/malformed complex -- see stderr)");
+            return nullptr;
+        }
+
+        // corners: 1-indexed boundary vertices, cclw order; null/empty ->
+        // let GOPack infer them (Packer::setMode's own crns={} default).
+        std::vector<gopack::Index> cornersIn;
+        if (corners != nullptr && env->GetArrayLength(corners) > 0) {
+            const jsize cornersLen = env->GetArrayLength(corners);
+            jint* cornersData = env->GetIntArrayElements(corners, nullptr);
+            cornersIn.assign(cornersData, cornersData + cornersLen);
+            env->ReleaseIntArrayElements(corners, cornersData, JNI_ABORT);
+        }
+
+        // angles: target corner angles as multiples of pi (CirclePack's own
+        // set_aim convention -- see this function's doc comment above),
+        // matching corners in count and order; null/empty -> automatic
+        // equal angles. Convert to radians here, since Packer::setMode()
+        // (like the MATLAB setMode.m it's ported from) works in radians.
+        std::vector<gopack::Scalar> anglesIn;
+        if (angles != nullptr && env->GetArrayLength(angles) > 0) {
+            const jsize anglesLen = env->GetArrayLength(angles);
+            jdouble* anglesData = env->GetDoubleArrayElements(angles, nullptr);
+            anglesIn.resize(static_cast<size_t>(anglesLen));
+            for (jsize i = 0; i < anglesLen; ++i) {
+                anglesIn[static_cast<size_t>(i)] = anglesData[i] * gopack::kPi;
+            }
+            env->ReleaseDoubleArrayElements(angles, anglesData, JNI_ABORT);
+        }
+        if (!anglesIn.empty() && cornersIn.empty()) {
+            throwGOPackException(env,
+                "GOPack native: angles given without corners -- corners must be given "
+                "explicitly to pair with angles");
+            return nullptr;
+        }
+        if (!anglesIn.empty() && anglesIn.size() != cornersIn.size()) {
+            throwGOPackException(env,
+                "GOPack native: angles.length must match corners.length (or both be empty)");
+            return nullptr;
+        }
+
+        if (packer.setMode(2, cornersIn, anglesIn) < 0) {
+            throwGOPackException(env,
+                "GOPack native: setMode(2, corners, angles) failed -- see stderr for the "
+                "specific diagnostic (e.g. a given corner isn't a boundary vertex, or corner "
+                "angles aren't consistent with the polygon's turning-angle requirement)");
+            return nullptr;
+        }
+
+        gopack::RiffleResult result = packer.riffle(maxPasses > 0 ? maxPasses : 200);
+        if (result.cycles < 0) {
+            throwGOPackException(env, "GOPack native: riffle failed");
+            return nullptr;
+        }
+
+        // Same radii/centerX/centerY marshalling as
+        // computeMaximalPackingFromComplex above, plus a 4th row for the
+        // corner vertices actually used (see this function's doc comment).
+        const jsize n = static_cast<jsize>(packer.nodeCount) + 1;
+
+        jdoubleArray radiiArr = env->NewDoubleArray(n);
+        if (radiiArr == nullptr) {
+            throwGOPackException(env, "Failed to allocate radii result array");
+            return nullptr;
+        }
+        env->SetDoubleArrayRegion(radiiArr, 0, n, packer.radii.data());
+
+        std::vector<jdouble> re(static_cast<size_t>(n)), im(static_cast<size_t>(n));
+        for (jsize v = 0; v < n; ++v) {
+            re[static_cast<size_t>(v)] = packer.centers[static_cast<size_t>(v)].real();
+            im[static_cast<size_t>(v)] = packer.centers[static_cast<size_t>(v)].imag();
+        }
+        jdoubleArray centerXArr = env->NewDoubleArray(n);
+        jdoubleArray centerYArr = env->NewDoubleArray(n);
+        if (centerXArr == nullptr || centerYArr == nullptr) {
+            throwGOPackException(env, "Failed to allocate centers result array");
+            return nullptr;
+        }
+        env->SetDoubleArrayRegion(centerXArr, 0, n, re.data());
+        env->SetDoubleArrayRegion(centerYArr, 0, n, im.data());
+
+        const jsize cornerCount = static_cast<jsize>(packer.corners.size());
+        std::vector<jdouble> cornersOut(static_cast<size_t>(cornerCount));
+        for (jsize i = 0; i < cornerCount; ++i) {
+            cornersOut[static_cast<size_t>(i)] = static_cast<jdouble>(packer.corners[static_cast<size_t>(i)]);
+        }
+        jdoubleArray cornersArr = env->NewDoubleArray(cornerCount);
+        if (cornersArr == nullptr) {
+            throwGOPackException(env, "Failed to allocate corners result array");
+            return nullptr;
+        }
+        if (cornerCount > 0) {
+            env->SetDoubleArrayRegion(cornersArr, 0, cornerCount, cornersOut.data());
+        }
+
+        jclass doubleArrayClass = env->FindClass("[D");
+        if (doubleArrayClass == nullptr) {
+            throwGOPackException(env, "GOPack native: [D class not found");
+            return nullptr;
+        }
+        jobjectArray out = env->NewObjectArray(4, doubleArrayClass, nullptr);
+        if (out == nullptr) {
+            throwGOPackException(env, "Failed to allocate result array");
+            return nullptr;
+        }
+        env->SetObjectArrayElement(out, 0, radiiArr);
+        env->SetObjectArrayElement(out, 1, centerXArr);
+        env->SetObjectArrayElement(out, 2, centerYArr);
+        env->SetObjectArrayElement(out, 3, cornersArr);
+        return out;
+    } catch (const std::exception& e) {
+        throwGOPackException(env, e.what());
+        return nullptr;
+    }
+}
+
 #ifdef GOPACK_HAVE_RANDOM_GEN
 // RandomComplexResult computeRandomTri(int intN, int bdryN, double[] graphXY,
 //     double centX, double centY, boolean hasCent, int maxPasses)

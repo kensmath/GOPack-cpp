@@ -248,19 +248,6 @@ files), so porting them is a bounded follow-up, not new research.
   the tangency points on the normal riffle-then-write path, not a second
   real optimization.
 
-### A deliberate deviation from the literal source: the `proj_vec_to_sph` typo
-
-`code/s_to_e_data.m` calls a function `proj_vec_to_sph` that does not exist
-anywhere in the repository -- it's a typo for `proj_vec_to_s.m`. The C++
-port (`geom::sToEData` in `core/src/Geometry.cpp`) calls the real function,
-since that's unambiguously the intent; reproducing the bug would mean this
-one rarely-hit code path (spherical circles enclosing the point at infinity)
-throws in MATLAB and silently "works" here. (This one is a straight bug fix
-with no behavioral trade-off either way, unlike the `setMode(2, ...)`
-hes-reset and `reapResults()` spherical-normalization notes above, which
-are deliberate behavior changes beyond the literal source rather than typo
-fixes -- all three are the deviations this port currently knows about.)
-
 ## What has -- and hasn't -- been verified
 
 - Ten regression tests (`tests/test_hex_flower.cpp`,
