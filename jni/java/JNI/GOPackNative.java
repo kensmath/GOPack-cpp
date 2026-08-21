@@ -41,11 +41,11 @@ public final class GOPackNative {
      * maximal packing (mode 1: max pack in the disc/plane, or on the sphere
      * if the complex has no boundary).
      *
-     * <p>This bridge method only exposes maximal-packing mode (mode 1).
-     * Polygonal/rectangle packing (mode 2) is ported in the C++ core
-     * ({@code Packer::setMode}/{@code setPolyCenters}/{@code setRectCenters})
-     * but not yet wired up to a JNI entry point -- the CLI's {@code
-     * --polygon} flag is the only way to reach it today.
+     * <p>This bridge method only exposes maximal-packing mode (mode 1) from a
+     * file path. Polygonal/rectangle packing (mode 2) is available as {@link
+     * #computePolygonalPackingFromComplex} (in-memory complex only, no file-path
+     * counterpart of this method exists for it); the CLI's {@code --polygon}
+     * flag reaches the same native code from a file.
      *
      * @param inputPath  path to a *.p triangulation/packing file
      * @param geometryHint reserved for future use (currently ignored --
@@ -96,15 +96,94 @@ public final class GOPackNative {
      *                  pass 0.0
      * @param maxPasses upper bound on riffle passes (pass &lt;= 0 to use the
      *                  native default of 200)
-     * @return euclidean radii for every vertex, in the same {@code
-     *         nodeCount+1}-length, 1-indexed convention as {@link
-     *         #computeMaximalPacking}. Throws {@link GOPackException} if the
-     *         native call fails (e.g. a malformed complex -- wrong array
-     *         lengths, no interior vertex, etc.).
+     * @return a 3-row {@code double[][]}, each row length {@code
+     *         nodeCount+1} (1-indexed, index 0 unused), matching {@code
+     *         jni/cpp/JNI_GOPackNative.cpp}'s documented contract exactly:
+     *         {@code result[0]} radii, {@code result[1]} center real parts,
+     *         {@code result[2]} center imaginary parts. <b>Must stay {@code
+     *         double[][]}</b> -- JNI links native methods by name+descriptor
+     *         only, not by return type, so a mismatch here against the
+     *         native side's actual {@code jobjectArray} return would link
+     *         and run with no JNI-level error, but corrupt memory at
+     *         runtime (this project hit exactly that crash once already,
+     *         from this method declared as a flat {@code double[]} while
+     *         the native side returned an object array -- see the {@code
+     *         .cpp} implementation's own warning comment for the full
+     *         story; don't reintroduce it). Throws {@link GOPackException}
+     *         if the native call fails (e.g. a malformed complex -- wrong
+     *         array lengths, no interior vertex, etc.).
      */
-    public static native double[] computeMaximalPackingFromComplex(
+    public static native double[][] computeMaximalPackingFromComplex(
             int nodeCount, int[][] flowers, int geometry, double tolerance, int maxPasses)
             throws GOPackException;
+
+    /**
+     * Polygonal/rectangle packing (mode 2) counterpart to {@link
+     * #computeMaximalPackingFromComplex}: loads a triangulation already held
+     * in memory (same {@code flowers}/{@code geometry} convention as that
+     * method), then instead of maximal-packing mode, sets polygonal mode via
+     * {@code gopack::Packer::setMode(2, corners, angles)} before riffling.
+     * See {@code setMode}'s doc comment in {@code core/include/gopack/Packer.h}
+     * for the authoritative corner/angle semantics.
+     *
+     * <p>Entering mode 2 always resets the packing's internal geometry to
+     * Euclidean, regardless of the {@code geometry} passed in here (a
+     * deliberate GOPack behavior -- polygonal packings are inherently
+     * planar).
+     *
+     * @param nodeCount number of vertices in the complex
+     * @param flowers   same convention as {@link #computeMaximalPackingFromComplex}
+     * @param geometry  0 = Euclidean, -1 = Hyperbolic, +1 = Spherical --
+     *                  accepted for consistency with the other bridges, but
+     *                  see the note above: mode 2 always ends up Euclidean
+     *                  regardless
+     * @param corners   1-indexed boundary vertices to use as polygon
+     *                  corners, in counterclockwise order. Pass {@code null}
+     *                  or a 0-length array to let GOPack infer/choose
+     *                  corners automatically (mirrors {@code
+     *                  Packer::setMode}'s own {@code crns={}} default --
+     *                  "figure out the corners for me", which for an
+     *                  in-memory complex with no {@code vlist} set means
+     *                  genuine pseudo-random corner selection -- see {@code
+     *                  Packer::setMode}'s doc comment)
+     * @param angles    target corner angles as <b>multiples of pi</b> (the
+     *                  same convention CirclePack's own {@code set_aim}
+     *                  command uses -- e.g. pass {@code 0.5} for a right
+     *                  angle, <b>not</b> {@code Math.PI/2.0}), matching
+     *                  {@code corners} in count and order. This bridge
+     *                  converts to radians internally before calling {@code
+     *                  Packer::setMode()}, which itself works in radians.
+     *                  Pass {@code null} or a 0-length array for automatic
+     *                  equal angles (e.g. {@code 0.5} each for a 4-corner
+     *                  rectangle). Must be empty whenever {@code corners} is
+     *                  empty -- passing angles without corners throws {@link
+     *                  GOPackException}, since there'd be no way to say
+     *                  which angle belongs to which (as-yet-unchosen)
+     *                  corner. The angles must also be consistent with the
+     *                  polygon's turning-angle requirement ({@code sum(1 -
+     *                  angle)} over all corners {@code == 2}); {@code
+     *                  setMode()} validates this and a violation surfaces as
+     *                  {@link GOPackException} rather than silently
+     *                  producing a bad packing.
+     * @param maxPasses upper bound on riffle passes (pass &lt;= 0 to use the
+     *                  native default of 200)
+     * @return a 4-row {@code double[][]}, each row length {@code
+     *         nodeCount+1} (1-indexed, index 0 unused) <b>except the last
+     *         row</b>: {@code result[0]} radii, {@code result[1]} center
+     *         real parts, {@code result[2]} center imaginary parts, {@code
+     *         result[3]} the actual corner vertices used (as {@code
+     *         double}s, exact for the small integers involved) -- this is
+     *         what you gave in {@code corners} when non-empty, or GOPack's
+     *         own automatic choice when {@code corners} was null/empty;
+     *         its length is the number of corners actually used, <b>not</b>
+     *         {@code nodeCount+1} like the other three rows -- check its
+     *         length rather than assuming 4. Throws {@link GOPackException}
+     *         if the native call fails (malformed complex, invalid corners,
+     *         or angles inconsistent with the turning-angle requirement).
+     */
+    public static native double[][] computePolygonalPackingFromComplex(
+            int nodeCount, int[][] flowers, int geometry, int[] corners, double[] angles,
+            int maxPasses) throws GOPackException;
 
     // -------------------------------------------------------------------
     // "Raw triangulation" generators -- computeRandomTri/computeRandomSphere/

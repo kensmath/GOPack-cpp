@@ -312,6 +312,27 @@ std::pair<Scalar, Complex> affineNormalizer(std::vector<Complex> T) {
     constexpr Scalar kNTol = 0.001;
     constexpr int kCycles = 20;
 
+    // Deviation from affineNormalizer.m: floor on the scale coordinate
+    // (m[0]/j==0 below), strictly greater than zero. centroid()'s objective
+    // only ever uses trans[0] *squared* (mu=trans[0]*p.real()+trans[1], sq=
+    // mu*mu+mv*mv), so it cannot distinguish a scale of 'a' from '-a' --
+    // nothing in the literal source stops this greedy coordinate search from
+    // wandering across that sign boundary, and it's not just a hypothetical
+    // tie: direct stress-testing (200k random point clouds, see
+    // HANDOFFrandomtrinorepack.md's follow-up investigation) shows roughly
+    // 0.4% of inputs make the unguarded search land on a genuinely negative
+    // scale. That matters here specifically because the sole caller,
+    // Packer::reapResults(), applies this scale uniformly to every vertex's
+    // radius ("radii[v] = A * radii[v]") -- a negative (or zero) scale
+    // silently flips every radius negative (or collapses them all to zero)
+    // for the whole packing, which is exactly the failure
+    // tests/test_sphere_normalize.cpp caught in CI. kMinScale is set far
+    // below any legitimate correction this near-identity recentering step
+    // should ever need (it only nudges an already-good packing), so this
+    // only ever blocks the pathological sign-flip/collapse case, never a
+    // real in-range correction.
+    constexpr Scalar kMinScale = 1e-6;
+
     int outercount = 0;
     while (bestsq > kNTol && outercount < kCycles) {
         Scalar delt = 2.0;
@@ -328,7 +349,7 @@ std::pair<Scalar, Complex> affineNormalizer(std::vector<Complex> T) {
                 if (newnorm < bestsq) {
                     bestsq = newnorm;
                     gotOne = j + 1;
-                } else {
+                } else if (j != 0 || holdp - delt > kMinScale) {
                     m[j] = m[j] - delt;
                     newnorm = centroid(T, m).normSq;
                     m[j] = holdp;
@@ -360,6 +381,20 @@ std::pair<Scalar, Complex> affineNormalizer(std::vector<Complex> T) {
             M = newM;
         }
         ++outercount;
+    }
+
+    // Defensive backstop, not expected to ever trigger given the per-step
+    // guard above (each outer round's m[0] is kept > kMinScale throughout,
+    // so the accumulated product M[0] -- a product of positive factors --
+    // must itself stay positive): if M[0] somehow isn't strictly positive
+    // anyway, fall back to the identity transform rather than ever handing
+    // reapResults() a scale that would corrupt every radius.
+    if (!(M[0] > 0.0)) {
+        std::fprintf(stderr,
+                     "affineNormalizer: internal scale guard tripped (M[0]=%g) -- "
+                     "returning identity transform instead\n",
+                     M[0]);
+        return {1.0, Complex(0.0, 0.0)};
     }
     return {M[0], Complex(M[1], M[2])};
 }
