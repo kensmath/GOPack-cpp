@@ -26,6 +26,44 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# Static runtime linking
+# ---------------------------------------------------------------------------
+# gopack_jni is not just a build artifact for developers -- the prebuilt
+# .dll/.so/.dylib is bundled straight into CirclePack's jar (cdeps/) and
+# loaded via System.load() on end-user machines that may have nothing else
+# installed. Relying on each platform's *default* (dynamic) C/C++ runtime
+# linking would mean assuming the target machine already has a matching
+# runtime present, which isn't safe on a genuinely clean install:
+#   - Windows (MSVC): the CMake/MSVC default is /MD (dynamic CRT), which
+#     makes gopack_jni.dll depend on the Visual C++ Redistributable being
+#     installed on the target machine -- not guaranteed. Statically linking
+#     the MSVC runtime (/MT) removes that dependency entirely.
+#   - Linux (GCC/Clang, non-Apple): our CI builds inside a manylinux2014
+#     (glibc 2.17) container using devtoolset-10 for a C++17-capable GCC, but
+#     that newer GCC's own *default* libstdc++.so.6 can be newer than what's
+#     actually present on the older target distros the manylinux2014
+#     baseline is meant to support -- the classic manylinux/auditwheel
+#     problem. -static-libgcc -static-libstdc++ statically links just those
+#     two runtime libraries into gopack_jni.so, leaving only glibc/libc
+#     itself as a runtime dependency (glibc keeps strong backward
+#     compatibility, which is the whole point of the old baseline).
+#   - macOS: no equivalent issue exists, so no fix is applied here --
+#     Apple's system libc++/libSystem ship with the OS itself.
+# This is set here (directory scope, before any add_subdirectory() calls
+# below) so it's inherited by every target this project builds --
+# third_party, core, cli, jni/cpp, and tests alike.
+if(MSVC)
+    # CMAKE_MSVC_RUNTIME_LIBRARY only takes effect under policy CMP0091=NEW;
+    # that's already the default given cmake_minimum_required(VERSION 3.18)
+    # above, but set it explicitly here so this block keeps working even if
+    # the minimum-required version above is ever lowered.
+    cmake_policy(SET CMP0091 NEW)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+elseif(NOT APPLE)
+    add_link_options(-static-libgcc -static-libstdc++)
+endif()
+
+# ---------------------------------------------------------------------------
 # Eigen (header-only sparse/dense linear algebra, MPL2 license)
 # ---------------------------------------------------------------------------
 # We only need the headers -- Eigen is header-only for our purposes, and we

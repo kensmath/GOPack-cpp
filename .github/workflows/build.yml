@@ -59,6 +59,21 @@ jobs:
         shell: cmd
         continue-on-error: true
 
+      # Informational only (continue-on-error) rather than a hard gate --
+      # dumpbin's exact PATH availability on windows-latest isn't guaranteed
+      # to stay stable across runner image updates, and we don't want a
+      # tooling hiccup here to fail the whole job. What this is checking:
+      # CMakeLists.txt now statically links the MSVC runtime (/MT, via
+      # CMAKE_MSVC_RUNTIME_LIBRARY) specifically so gopack_jni.dll doesn't
+      # need the Visual C++ Redistributable on a clean end-user machine --
+      # if that ever regresses, VCRUNTIME140.dll/MSVCP140.dll will reappear
+      # in this dependency listing.
+      - name: Verify static CRT linking (Windows)
+        if: runner.os == 'Windows'
+        run: dumpbin /dependents dist\gopack_jni.dll
+        shell: cmd
+        continue-on-error: true
+
       - name: Package artifacts (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -126,6 +141,24 @@ jobs:
           cp build/jni/cpp/libgopack_jni.so dist/ || true
           file dist/* || true
         continue-on-error: true
+
+      # Hard gate, unlike the Windows dumpbin check above: ldd is always
+      # present on ubuntu-latest, so there's no tooling-availability risk in
+      # failing the job on this. CMakeLists.txt now links
+      # -static-libgcc -static-libstdc++ specifically so libgopack_jni.so
+      # doesn't depend on a libstdc++.so.6 newer than what's on the actual
+      # (older) target distros the manylinux2014 baseline is meant to
+      # support -- if that ever regresses, a dynamic libstdc++ dependency
+      # will reappear here and this step fails the build.
+      - name: Verify static libstdc++/libgcc linking (Linux)
+        run: |
+          if ldd dist/libgopack_jni.so | grep -qi 'libstdc++\|libgcc_s'; then
+            echo "::error::libgopack_jni.so unexpectedly depends on a dynamic libstdc++/libgcc -- static linking regressed."
+            ldd dist/libgopack_jni.so
+            exit 1
+          fi
+          echo "OK: libgopack_jni.so has no dynamic libstdc++/libgcc_s dependency."
+          ldd dist/libgopack_jni.so
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
