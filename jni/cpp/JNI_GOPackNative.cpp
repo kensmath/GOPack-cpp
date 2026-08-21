@@ -514,14 +514,39 @@ Java_JNI_GOPackNative_computePolygonalPackingFromComplex(
     }
 }
 
+// ---------------------------------------------------------------------------
+// "Raw triangulation" generators -- computeRandomTri/computeRandomSphere/
+// computeRandomRectangle/computeRandomSquare below all back CirclePack's
+// random_tri command, which by design only ever hands back a triangulation
+// (combinatorics + a raw, unpacked layout), never a packing -- whether the
+// requested shape is a sphere, a rectangle/square, or an arbitrary
+// curve-bounded region. None of them call setMode()/riffle().
+//
+// Deliberately NOT represented as a "packed" flag anywhere in
+// RandomComplexResult: whether a triangulation later gets packed is a
+// separate, independent action a caller may or may not take afterward (e.g.
+// via computeMaximalPackingFromComplex/computePolygonalPackingFromComplex on
+// the loaded complex) -- it isn't a fact about the triangulation itself, and
+// nothing on either side of the JNI boundary keeps the native Packer around
+// between calls to track it. mode/corners are still returned as-is (they
+// cost nothing and remain useful metadata -- "here's the packing this
+// triangulation was shaped for, if you ever want it"), but callers should
+// not read them as "this has already been packed".
+//
+// See HANDOFFrandomtrinorepack.md for the original request this implements,
+// and computeRandomDisc below for GOPack-cpp's one deliberately-still-packed
+// random generator (backing the separate random_disc command, which -- unlike
+// random_tri -- genuinely wants a packing).
+// ---------------------------------------------------------------------------
+
 #ifdef GOPACK_HAVE_RANDOM_GEN
 // RandomComplexResult computeRandomTri(int intN, int bdryN, double[] graphXY,
-//     double centX, double centY, boolean hasCent, int maxPasses)
+//     double centX, double centY, boolean hasCent)
 //
-// Bridges Packer::randomTri(intN, bdryN, graph, cent) -- a random
+// Bridges Packer::randomTri(intN, bdryN, graph, cent) -- a random Delaunay
 // triangulation of an ARBITRARY closed polygonal region, not just a fixed
 // disc/square/rectangle -- so CirclePack can hand it a user-drawn boundary
-// and get back a full ready-to-render complex. See
+// and get back the raw combinatorics + point layout. See
 // RandomComplexResult.java and this file's computeRandomTri Javadoc
 // counterpart in GOPackNative.java for the full field semantics.
 //
@@ -530,93 +555,6 @@ Java_JNI_GOPackNative_computePolygonalPackingFromComplex(
 // 6 (i.e. at least 3 points).
 JNIEXPORT jobject JNICALL
 Java_JNI_GOPackNative_computeRandomTri(
-    JNIEnv* env, jclass /*clazz*/, jint intN, jint bdryN, jdoubleArray graphXY, jdouble centX,
-    jdouble centY, jboolean hasCent, jint maxPasses) {
-
-    try {
-        const jsize flatLen = env->GetArrayLength(graphXY);
-        if (flatLen < 6 || (flatLen % 2) != 0) {
-            throwGOPackException(env,
-                "GOPack native: graphXY must hold at least 3 (x,y) points and have an even "
-                "length");
-            return nullptr;
-        }
-        jdouble* flat = env->GetDoubleArrayElements(graphXY, nullptr);
-        std::vector<gopack::Complex> graph;
-        graph.reserve(static_cast<size_t>(flatLen) / 2);
-        for (jsize i = 0; i + 1 < flatLen; i += 2) {
-            graph.emplace_back(flat[i], flat[i + 1]);
-        }
-        env->ReleaseDoubleArrayElements(graphXY, flat, JNI_ABORT);
-
-        gopack::Complex cent(centX, centY);
-        gopack::Packer packer = gopack::Packer::randomTri(
-            static_cast<gopack::Index>(intN), static_cast<gopack::Index>(bdryN), graph,
-            hasCent ? &cent : nullptr);
-        if (packer.nodeCount <= 0) {
-            throwGOPackException(env,
-                "GOPack native: randomTri failed to produce a usable complex (bad graph, or "
-                "intN/bdryN too small -- see stderr)");
-            return nullptr;
-        }
-        // randomTri() leaves mode at its Packer()-default of 1 (max-pack)
-        // but does NOT itself call setMode() -- unlike randomRectangle()/
-        // randomSquare(), which already call setMode(2, ...) internally --
-        // so vAims (riffle()'s target angle sums) still needs to be
-        // populated here, exactly as cli/main.cpp's own --random-tri
-        // handling and the two bridges above already do for their sources.
-        if (packer.setMode(1) < 0) {
-            throwGOPackException(env, "GOPack native: failed to set max-pack mode");
-            return nullptr;
-        }
-
-        gopack::RiffleResult result = packer.riffle(maxPasses > 0 ? maxPasses : 200);
-        if (result.cycles < 0) {
-            throwGOPackException(env, "GOPack native: riffle failed");
-            return nullptr;
-        }
-
-        return buildRandomComplexResult(env, packer);
-    } catch (const std::exception& e) {
-        throwGOPackException(env, e.what());
-        return nullptr;
-    }
-}
-#endif // GOPACK_HAVE_RANDOM_GEN
-
-#ifdef GOPACK_HAVE_RANDOM_GEN
-// RandomComplexResult computeRandomTriLayout(int intN, int bdryN, double[]
-//     graphXY, double centX, double centY, boolean hasCent)
-//
-// Raw-layout counterpart to computeRandomTri() above: same generator
-// (Packer::randomTri(intN, bdryN, graph, cent) -- a Delaunay triangulation
-// of randomly placed points inside an arbitrary closed polygonal region),
-// but deliberately skips setMode(1)/riffle() so the result is the
-// triangulation's own raw post-Delaunay layout (combinatorics + the actual
-// Euclidean positions the random points were placed at) instead of that
-// triangulation's intrinsic maximal packing.
-//
-// Why this exists as a separate method rather than a flag on
-// computeRandomTri: for a disc-topology complex, the maximal packing is,
-// by construction/uniformization, the canonical packing that fills the
-// unit disc -- completely independent of graphXY's actual Euclidean shape.
-// A caller that wants the result to visually resemble the input region
-// (e.g. CirclePack's own pure-Java RandomTriangulation/Triangulation path,
-// which this bridge is meant to eventually replace for large complexes)
-// needs the raw layout, not a repacked one; the two are not reachable from
-// each other by any post-hoc transform of the riffled result, since
-// riffle() already discards the original positions. See
-// HANDOFFrandomtrinorepack.md for the full request this implements.
-//
-// graphXY: same convention as computeRandomTri -- flat x,y coordinate list
-// for the closed boundary polygon (do not repeat the first point at the
-// end); must have an even length of at least 6 (i.e. at least 3 points).
-//
-// No maxPasses parameter: unlike computeRandomTri, nothing here ever
-// riffles, so a pass-count bound would be silently ignored -- omitted
-// entirely rather than kept as a confusing no-op argument.
-JNIEXPORT jobject JNICALL
-Java_JNI_GOPackNative_computeRandomTriLayout(
     JNIEnv* env, jclass /*clazz*/, jint intN, jint bdryN, jdoubleArray graphXY, jdouble centX,
     jdouble centY, jboolean hasCent) {
 
@@ -647,14 +585,117 @@ Java_JNI_GOPackNative_computeRandomTriLayout(
             return nullptr;
         }
 
-        // Deliberately no setMode()/riffle() here -- see this function's
-        // header comment. randomTri() itself already leaves the packer with
-        // hes = Euclidean and radii/centers populated by parseTriangles()
-        // (radii: a uniform 0.5 placeholder with no packing meaning;
-        // centers: the actual randomly-placed/Delaunay point positions) --
-        // buildRandomComplexResult() reads those fields directly and has no
-        // riffle()-completion assumption of its own, so it works unchanged
-        // on this non-riffled packer.
+        // Deliberately no setMode()/riffle() here -- see the header comment
+        // above this generator group. randomTri() itself already leaves the
+        // packer with hes = Euclidean and radii/centers populated by
+        // parseTriangles() (radii: a uniform 0.5 placeholder with no packing
+        // meaning; centers: the actual randomly-placed/Delaunay point
+        // positions) -- buildRandomComplexResult() reads those fields
+        // directly and has no riffle()-completion assumption of its own, so
+        // it works unchanged on this non-riffled packer.
+        return buildRandomComplexResult(env, packer);
+    } catch (const std::exception& e) {
+        throwGOPackException(env, e.what());
+        return nullptr;
+    }
+}
+#endif // GOPACK_HAVE_RANDOM_GEN
+
+#ifdef GOPACK_HAVE_RANDOM_GEN
+// RandomComplexResult computeRandomSphere(int intN)
+//
+// Bridges Packer::randomTri(intN) -- the sphere-only overload (equivalent to
+// Packer::randomSphere(intN), see that overload's own doc comment in
+// Packer.h) -- for a random Delaunay triangulation of the sphere. No
+// boundary/graph concept applies here (closed topology), so unlike
+// computeRandomTri there's no graphXY/cent to pass. Never packs; see the
+// header comment above this generator group.
+JNIEXPORT jobject JNICALL
+Java_JNI_GOPackNative_computeRandomSphere(
+    JNIEnv* env, jclass /*clazz*/, jint intN) {
+
+    try {
+        gopack::Packer packer = gopack::Packer::randomTri(static_cast<gopack::Index>(intN));
+        if (packer.nodeCount <= 0) {
+            throwGOPackException(env,
+                "GOPack native: randomSphere failed to produce a usable complex (intN < 4? "
+                "-- see stderr)");
+            return nullptr;
+        }
+        // No setMode()/riffle() -- randomTri(intN) already sets hes =
+        // Spherical directly; radii/centers come from parseTriangles() the
+        // same as computeRandomTri's raw layout (radii: 0.5 placeholder;
+        // centers: unused (theta,phi) never even reaches parseTriangles()'s
+        // cents argument here -- see randomSphere()'s own comment on why --
+        // so treat centers as meaningless for this generator specifically,
+        // only flowers/nodeCount/geometry matter).
+        return buildRandomComplexResult(env, packer);
+    } catch (const std::exception& e) {
+        throwGOPackException(env, e.what());
+        return nullptr;
+    }
+}
+#endif // GOPACK_HAVE_RANDOM_GEN
+
+#ifdef GOPACK_HAVE_RANDOM_GEN
+// RandomComplexResult computeRandomRectangle(int intN, double aspect, int
+//     bdryN)
+//
+// Bridges Packer::randomRectangle(intN, aspect, bdryN) -- a random Delaunay
+// triangulation of the rectangle [-aspect,aspect]x[-1,1]. Never packs; see
+// the header comment above this generator group. Unlike the other
+// generators here, randomRectangle() already calls setMode(2, ...)
+// internally (to identify and record the 4 actual corner vertices as
+// packer.corners -- returned in RandomComplexResult#corners) but that call
+// only configures mode/corners bookkeeping, it does not riffle.
+//
+// bdryN: pass <= 0 to use randomRectangle()'s own default boundary-point
+// formula (matching Packer::randomRectangle's own bdryN=-1 default); a
+// positive value overrides it.
+JNIEXPORT jobject JNICALL
+Java_JNI_GOPackNative_computeRandomRectangle(
+    JNIEnv* env, jclass /*clazz*/, jint intN, jdouble aspect, jint bdryN) {
+
+    try {
+        gopack::Packer packer = gopack::Packer::randomRectangle(
+            static_cast<gopack::Index>(intN), static_cast<gopack::Scalar>(aspect),
+            static_cast<gopack::Index>(bdryN));
+        if (packer.nodeCount <= 0) {
+            throwGOPackException(env,
+                "GOPack native: randomRectangle failed to produce a usable complex (intN < 1? "
+                "-- see stderr)");
+            return nullptr;
+        }
+        return buildRandomComplexResult(env, packer);
+    } catch (const std::exception& e) {
+        throwGOPackException(env, e.what());
+        return nullptr;
+    }
+}
+#endif // GOPACK_HAVE_RANDOM_GEN
+
+#ifdef GOPACK_HAVE_RANDOM_GEN
+// RandomComplexResult computeRandomSquare(int n)
+//
+// Bridges Packer::randomSquare(n) -- a thin wrapper over
+// Packer::randomRectangle(intN, 1.0, bdryN) that derives intN/bdryN from a
+// single total point count n using randomSquare()'s own interior/boundary
+// split formula (see Packer.h). Exposed as its own bridge (rather than
+// leaving that split to be reimplemented in Java) so the split formula has
+// exactly one home. Never packs; see the header comment above this
+// generator group.
+JNIEXPORT jobject JNICALL
+Java_JNI_GOPackNative_computeRandomSquare(
+    JNIEnv* env, jclass /*clazz*/, jint n) {
+
+    try {
+        gopack::Packer packer = gopack::Packer::randomSquare(static_cast<gopack::Index>(n));
+        if (packer.nodeCount <= 0) {
+            throwGOPackException(env,
+                "GOPack native: randomSquare failed to produce a usable complex (n too small? "
+                "-- see stderr)");
+            return nullptr;
+        }
         return buildRandomComplexResult(env, packer);
     } catch (const std::exception& e) {
         throwGOPackException(env, e.what());

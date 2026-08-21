@@ -1,13 +1,20 @@
 package JNI;
 
 /**
- * The result of a native "geometrically random" triangulation generator
- * (e.g. {@link GOPackNative#computeRandomTri}), after it has been riffled to
- * a maximal (or polygonal) packing -- <b>except</b> for
- * {@link GOPackNative#computeRandomTriLayout}, which deliberately skips
- * riffling and returns the triangulation's raw post-Delaunay layout instead;
- * see that method's Javadoc for what {@link #radii}/{@link #centersRe}/
- * {@link #centersIm} mean in that case.
+ * The result of a native "geometrically random" triangulation generator.
+ *
+ * <p>Most of these generators ({@link GOPackNative#computeRandomTri}, {@link
+ * GOPackNative#computeRandomSphere}, {@link
+ * GOPackNative#computeRandomRectangle}, {@link
+ * GOPackNative#computeRandomSquare}) deliberately return a <b>raw,
+ * unpacked</b> triangulation -- combinatorics plus the actual point layout
+ * the random generator produced -- with {@code riffle()} never called; see
+ * each method's own Javadoc for what {@link #radii}/{@link #centersRe}/
+ * {@link #centersIm} mean in that case (typically: {@link #radii} is a
+ * meaningless uniform placeholder, and {@link #centersRe}/{@link #centersIm}
+ * hold the real raw positions). The lone exception is {@link
+ * GOPackNative#computeRandomDisc}, which genuinely does riffle to a maximal
+ * packing -- see that method's Javadoc.
  *
  * <p>Unlike {@link GOPackNative#computeMaximalPacking} and
  * {@link GOPackNative#computeMaximalPackingFromComplex} -- where the caller
@@ -38,28 +45,38 @@ public final class RandomComplexResult {
     public final int[][] flowers;
 
     /**
-     * Euclidean radii after riffle(), 1-indexed, {@code radii[0]} unused.
-     * For {@link GOPackNative#computeRandomTriLayout} specifically, riffle()
-     * never runs, so this is instead a uniform placeholder ({@code 0.5} for
-     * every vertex) with no packing meaning -- ignore it and use
-     * {@link #centersRe}/{@link #centersIm} for the raw layout's actual
-     * point positions.
+     * 1-indexed, {@code radii[0]} unused. For {@link
+     * GOPackNative#computeRandomDisc} (the one generator that actually
+     * packs), these are real Euclidean radii after {@code riffle()}. For
+     * every other generator in this class -- {@link
+     * GOPackNative#computeRandomTri}, {@link GOPackNative#computeRandomSphere},
+     * {@link GOPackNative#computeRandomRectangle}, {@link
+     * GOPackNative#computeRandomSquare} -- {@code riffle()} never runs, so
+     * this is instead a uniform placeholder ({@code 0.5} for every vertex)
+     * with no packing meaning -- ignore it and use {@link #centersRe}/
+     * {@link #centersIm} for the raw layout's actual point positions.
      */
     public final double[] radii;
 
     /**
-     * Real part of each vertex's center after riffle(), 1-indexed, index 0
-     * unused. For {@link GOPackNative#computeRandomTriLayout} specifically,
-     * this is instead the vertex's raw (pre-packing) x coordinate as placed
-     * by the random Delaunay generator.
+     * Real part of each vertex's center, 1-indexed, index 0 unused. For
+     * {@link GOPackNative#computeRandomDisc}, this is the real center after
+     * {@code riffle()}. For every other generator in this class, this is
+     * instead the vertex's raw (pre-packing) x coordinate as placed by the
+     * random Delaunay generator -- except {@link
+     * GOPackNative#computeRandomSphere}, where it is meaningless (always
+     * {@code 0}; see that method's Javadoc).
      */
     public final double[] centersRe;
 
     /**
-     * Imaginary part of each vertex's center after riffle(), 1-indexed,
-     * index 0 unused. For {@link GOPackNative#computeRandomTriLayout}
-     * specifically, this is instead the vertex's raw (pre-packing) y
-     * coordinate as placed by the random Delaunay generator.
+     * Imaginary part of each vertex's center, 1-indexed, index 0 unused.
+     * For {@link GOPackNative#computeRandomDisc}, this is the real center
+     * after {@code riffle()}. For every other generator in this class, this
+     * is instead the vertex's raw (pre-packing) y coordinate as placed by
+     * the random Delaunay generator -- except {@link
+     * GOPackNative#computeRandomSphere}, where it is meaningless (always
+     * {@code 0}; see that method's Javadoc).
      */
     public final double[] centersIm;
 
@@ -79,9 +96,15 @@ public final class RandomComplexResult {
     public final int gamma;
 
     /**
-     * Corner vertex numbers, in counterclockwise order, for a polygonal
-     * (rectangle/square) generator; empty for generators that stay in
-     * max-pack mode (e.g. {@link GOPackNative#computeRandomTri}).
+     * Corner vertex numbers, in counterclockwise order -- populated by
+     * {@link GOPackNative#computeRandomRectangle}/{@link
+     * GOPackNative#computeRandomSquare} (identified via an internal {@code
+     * setMode(2, ...)} bookkeeping call that records corners without
+     * riffling -- see those methods' Javadoc); empty for every other
+     * generator in this class ({@link GOPackNative#computeRandomTri}, {@link
+     * GOPackNative#computeRandomSphere}, {@link
+     * GOPackNative#computeRandomDisc}), none of which have a polygonal
+     * "corners" concept.
      */
     public final int[] corners;
 
