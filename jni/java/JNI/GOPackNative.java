@@ -154,6 +154,68 @@ public final class GOPackNative {
             int maxPasses) throws GOPackException;
 
     /**
+     * Raw-layout counterpart to {@link #computeRandomTri}: generates the
+     * same random Delaunay triangulation of an arbitrary closed polygonal
+     * region, but returns its raw post-Delaunay layout -- combinatorics plus
+     * the actual Euclidean positions the random points were placed at --
+     * instead of riffling it to a packing. This is the JNI bridge to
+     * {@code gopack::Packer::randomTri(intN, bdryN, graph, cent)} with
+     * {@code setMode()}/{@code riffle()} deliberately skipped; see {@code
+     * jni/cpp/JNI_GOPackNative.cpp}'s
+     * {@code Java_JNI_GOPackNative_computeRandomTriLayout} for the full
+     * rationale.
+     *
+     * <p><b>Use this instead of {@link #computeRandomTri} when the result
+     * should visually resemble {@code graphXY}'s shape</b> -- e.g. to match
+     * CirclePack's own pure-Java {@code RandomTriangulation}/{@code
+     * Triangulation} path, which deliberately returns an unpacked layout for
+     * the same reason. {@link #computeRandomTri} instead riffles to that
+     * triangulation's own intrinsic maximal packing, which for a
+     * disc-topology complex is, by construction/uniformization, the
+     * canonical packing that fills the unit disc -- independent of {@code
+     * graphXY}'s actual shape, and not what you want if you need the result
+     * to resemble the input region.
+     *
+     * <p>In the returned {@link RandomComplexResult}: {@link
+     * RandomComplexResult#radii} is a uniform placeholder ({@code 0.5} for
+     * every vertex) with no packing meaning -- nothing has been solved for.
+     * {@link RandomComplexResult#centersRe}/{@link
+     * RandomComplexResult#centersIm} hold the real output: the actual
+     * randomly-placed/Delaunay point positions. {@link
+     * RandomComplexResult#geometry} is always Euclidean ({@code 0}), and
+     * {@link RandomComplexResult#corners} is always empty (no polygonal mode
+     * was entered).
+     *
+     * @param intN    number of interior points to generate
+     * @param bdryN   number of boundary points to generate
+     * @param graphXY the closed boundary polygon's vertices, as a flat
+     *                x0,y0,x1,y1,... coordinate list (do not repeat the
+     *                first point at the end); length must be even and at
+     *                least 6 (i.e. at least 3 points)
+     * @param centX   x coordinate of an optional point inside {@code
+     *                graphXY} to use as the packing's alpha (centering)
+     *                vertex; ignored unless {@code hasCent} is true
+     * @param centY   y coordinate of that optional point; ignored unless
+     *                {@code hasCent} is true
+     * @param hasCent whether {@code centX}/{@code centY} should be used;
+     *                pass false to let GOPack choose alpha automatically
+     *                (matching {@code Packer::randomTri()}'s {@code
+     *                cent=nullptr} default) -- also the fallback if the
+     *                given point doesn't actually land inside {@code
+     *                graphXY}
+     * @return the generated complex and its raw (unpacked) layout. Throws
+     *         {@link GOPackException} if generation fails (e.g. {@code
+     *         graphXY} too short/degenerate, {@code intN}/{@code bdryN} too
+     *         small to produce a usable complex). No riffle occurs, so there
+     *         is no separate "riffle failed" failure mode the way {@link
+     *         #computeRandomTri} has -- hence no {@code maxPasses} parameter
+     *         here either, since it would have nothing to bound.
+     */
+    public static native RandomComplexResult computeRandomTriLayout(
+            int intN, int bdryN, double[] graphXY, double centX, double centY, boolean hasCent)
+            throws GOPackException;
+
+    /**
      * Generates a random triangulation of the unit disc and computes its
      * maximal (hyperbolic) packing. This is the JNI bridge to {@code
      * gopack::Packer::randomDisc(N)} (see {@code core/include/gopack/Packer.h});

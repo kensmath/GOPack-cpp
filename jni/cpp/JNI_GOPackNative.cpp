@@ -585,6 +585,85 @@ Java_JNI_GOPackNative_computeRandomTri(
 #endif // GOPACK_HAVE_RANDOM_GEN
 
 #ifdef GOPACK_HAVE_RANDOM_GEN
+// RandomComplexResult computeRandomTriLayout(int intN, int bdryN, double[]
+//     graphXY, double centX, double centY, boolean hasCent)
+//
+// Raw-layout counterpart to computeRandomTri() above: same generator
+// (Packer::randomTri(intN, bdryN, graph, cent) -- a Delaunay triangulation
+// of randomly placed points inside an arbitrary closed polygonal region),
+// but deliberately skips setMode(1)/riffle() so the result is the
+// triangulation's own raw post-Delaunay layout (combinatorics + the actual
+// Euclidean positions the random points were placed at) instead of that
+// triangulation's intrinsic maximal packing.
+//
+// Why this exists as a separate method rather than a flag on
+// computeRandomTri: for a disc-topology complex, the maximal packing is,
+// by construction/uniformization, the canonical packing that fills the
+// unit disc -- completely independent of graphXY's actual Euclidean shape.
+// A caller that wants the result to visually resemble the input region
+// (e.g. CirclePack's own pure-Java RandomTriangulation/Triangulation path,
+// which this bridge is meant to eventually replace for large complexes)
+// needs the raw layout, not a repacked one; the two are not reachable from
+// each other by any post-hoc transform of the riffled result, since
+// riffle() already discards the original positions. See
+// HANDOFFrandomtrinorepack.md for the full request this implements.
+//
+// graphXY: same convention as computeRandomTri -- flat x,y coordinate list
+// for the closed boundary polygon (do not repeat the first point at the
+// end); must have an even length of at least 6 (i.e. at least 3 points).
+//
+// No maxPasses parameter: unlike computeRandomTri, nothing here ever
+// riffles, so a pass-count bound would be silently ignored -- omitted
+// entirely rather than kept as a confusing no-op argument.
+JNIEXPORT jobject JNICALL
+Java_JNI_GOPackNative_computeRandomTriLayout(
+    JNIEnv* env, jclass /*clazz*/, jint intN, jint bdryN, jdoubleArray graphXY, jdouble centX,
+    jdouble centY, jboolean hasCent) {
+
+    try {
+        const jsize flatLen = env->GetArrayLength(graphXY);
+        if (flatLen < 6 || (flatLen % 2) != 0) {
+            throwGOPackException(env,
+                "GOPack native: graphXY must hold at least 3 (x,y) points and have an even "
+                "length");
+            return nullptr;
+        }
+        jdouble* flat = env->GetDoubleArrayElements(graphXY, nullptr);
+        std::vector<gopack::Complex> graph;
+        graph.reserve(static_cast<size_t>(flatLen) / 2);
+        for (jsize i = 0; i + 1 < flatLen; i += 2) {
+            graph.emplace_back(flat[i], flat[i + 1]);
+        }
+        env->ReleaseDoubleArrayElements(graphXY, flat, JNI_ABORT);
+
+        gopack::Complex cent(centX, centY);
+        gopack::Packer packer = gopack::Packer::randomTri(
+            static_cast<gopack::Index>(intN), static_cast<gopack::Index>(bdryN), graph,
+            hasCent ? &cent : nullptr);
+        if (packer.nodeCount <= 0) {
+            throwGOPackException(env,
+                "GOPack native: randomTri failed to produce a usable complex (bad graph, or "
+                "intN/bdryN too small -- see stderr)");
+            return nullptr;
+        }
+
+        // Deliberately no setMode()/riffle() here -- see this function's
+        // header comment. randomTri() itself already leaves the packer with
+        // hes = Euclidean and radii/centers populated by parseTriangles()
+        // (radii: a uniform 0.5 placeholder with no packing meaning;
+        // centers: the actual randomly-placed/Delaunay point positions) --
+        // buildRandomComplexResult() reads those fields directly and has no
+        // riffle()-completion assumption of its own, so it works unchanged
+        // on this non-riffled packer.
+        return buildRandomComplexResult(env, packer);
+    } catch (const std::exception& e) {
+        throwGOPackException(env, e.what());
+        return nullptr;
+    }
+}
+#endif // GOPACK_HAVE_RANDOM_GEN
+
+#ifdef GOPACK_HAVE_RANDOM_GEN
 // RandomComplexResult computeRandomDisc(int n, int maxPasses)
 //
 // Bridges Packer::randomDisc(N) -- a random triangulation of the unit disc,

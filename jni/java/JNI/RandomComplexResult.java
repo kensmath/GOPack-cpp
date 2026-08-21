@@ -3,7 +3,11 @@ package JNI;
 /**
  * The result of a native "geometrically random" triangulation generator
  * (e.g. {@link GOPackNative#computeRandomTri}), after it has been riffled to
- * a maximal (or polygonal) packing.
+ * a maximal (or polygonal) packing -- <b>except</b> for
+ * {@link GOPackNative#computeRandomTriLayout}, which deliberately skips
+ * riffling and returns the triangulation's raw post-Delaunay layout instead;
+ * see that method's Javadoc for what {@link #radii}/{@link #centersRe}/
+ * {@link #centersIm} mean in that case.
  *
  * <p>Unlike {@link GOPackNative#computeMaximalPacking} and
  * {@link GOPackNative#computeMaximalPackingFromComplex} -- where the caller
@@ -33,13 +37,30 @@ public final class RandomComplexResult {
      */
     public final int[][] flowers;
 
-    /** Euclidean radii after riffle(), 1-indexed, {@code radii[0]} unused. */
+    /**
+     * Euclidean radii after riffle(), 1-indexed, {@code radii[0]} unused.
+     * For {@link GOPackNative#computeRandomTriLayout} specifically, riffle()
+     * never runs, so this is instead a uniform placeholder ({@code 0.5} for
+     * every vertex) with no packing meaning -- ignore it and use
+     * {@link #centersRe}/{@link #centersIm} for the raw layout's actual
+     * point positions.
+     */
     public final double[] radii;
 
-    /** Real part of each vertex's center after riffle(), 1-indexed, index 0 unused. */
+    /**
+     * Real part of each vertex's center after riffle(), 1-indexed, index 0
+     * unused. For {@link GOPackNative#computeRandomTriLayout} specifically,
+     * this is instead the vertex's raw (pre-packing) x coordinate as placed
+     * by the random Delaunay generator.
+     */
     public final double[] centersRe;
 
-    /** Imaginary part of each vertex's center after riffle(), 1-indexed, index 0 unused. */
+    /**
+     * Imaginary part of each vertex's center after riffle(), 1-indexed,
+     * index 0 unused. For {@link GOPackNative#computeRandomTriLayout}
+     * specifically, this is instead the vertex's raw (pre-packing) y
+     * coordinate as placed by the random Delaunay generator.
+     */
     public final double[] centersIm;
 
     /**
