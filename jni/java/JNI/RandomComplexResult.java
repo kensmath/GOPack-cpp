@@ -63,9 +63,10 @@ public final class RandomComplexResult {
      * {@link GOPackNative#computeRandomDisc}, this is the real center after
      * {@code riffle()}. For every other generator in this class, this is
      * instead the vertex's raw (pre-packing) x coordinate as placed by the
-     * random Delaunay generator -- except {@link
-     * GOPackNative#computeRandomSphere}, where it is meaningless (always
-     * {@code 0}; see that method's Javadoc).
+     * random Delaunay generator -- for {@link
+     * GOPackNative#computeRandomSphere} specifically, this is the vertex's
+     * {@code theta} polar coordinate ({@code projVecToS()}'s convention),
+     * not a planar x coordinate.
      */
     public final double[] centersRe;
 
@@ -74,9 +75,10 @@ public final class RandomComplexResult {
      * For {@link GOPackNative#computeRandomDisc}, this is the real center
      * after {@code riffle()}. For every other generator in this class, this
      * is instead the vertex's raw (pre-packing) y coordinate as placed by
-     * the random Delaunay generator -- except {@link
-     * GOPackNative#computeRandomSphere}, where it is meaningless (always
-     * {@code 0}; see that method's Javadoc).
+     * the random Delaunay generator -- for {@link
+     * GOPackNative#computeRandomSphere} specifically, this is the vertex's
+     * {@code phi} polar coordinate ({@code projVecToS()}'s convention), not
+     * a planar y coordinate.
      */
     public final double[] centersIm;
 

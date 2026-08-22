@@ -624,11 +624,14 @@ Java_JNI_GOPackNative_computeRandomSphere(
         }
         // No setMode()/riffle() -- randomTri(intN) already sets hes =
         // Spherical directly; radii/centers come from parseTriangles() the
-        // same as computeRandomTri's raw layout (radii: 0.5 placeholder;
-        // centers: unused (theta,phi) never even reaches parseTriangles()'s
-        // cents argument here -- see randomSphere()'s own comment on why --
-        // so treat centers as meaningless for this generator specifically,
-        // only flowers/nodeCount/geometry matter).
+        // same as computeRandomTri's raw layout: radii is the usual
+        // meaningless 0.5 placeholder, but centers is real here -- the
+        // actual per-vertex (theta,phi) position (projVecToS()'s convention)
+        // the random generator placed each point at, needed so a caller can
+        // display/lay out the raw triangulation before choosing whether to
+        // pack it (see randomSphere()'s own comment in PackerRandom.cpp for
+        // why this needed a deliberate deviation from the literal MATLAB
+        // source, which discards these positions).
         return buildRandomComplexResult(env, packer);
     } catch (const std::exception& e) {
         throwGOPackException(env, e.what());

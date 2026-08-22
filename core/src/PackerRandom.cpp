@@ -112,13 +112,32 @@ Packer Packer::randomSphere(Index intN) {
         return gop;
     }
 
-    // Note: Z has (theta,phi) values, but not useful in GOpacker -- omitted
-    // from the parseTriangles() call below, matching randomSphere.m's
-    // 'gop.parse_triangles(tri);' (no 'cents' argument).
     auto res = geom::randTriangulationSphere(intN);
     auto tList = shiftTriTo1Indexed(res.tri);
 
-    gop.parseTriangles(tList);
+    // Deviation from randomSphere.m/randomTri.m's nargin==1 branch: the
+    // literal source discards res.Z (the actual (theta,phi) point positions
+    // -- see RandTriangulationSphereResult's own doc comment in RandomGen.h)
+    // by calling parse_triangles.m with no 'cents' argument (matching
+    // randomSphere.m's own 'gop.parse_triangles(tri);'). That's fine for
+    // MATLAB's interactive use, where a caller riffles to a packing right
+    // away and never looks at the pre-riffle centers -- but GOPack-cpp's JNI
+    // bridge (computeRandomSphere) deliberately returns the RAW, unpacked
+    // triangulation for CirclePack's random_tri command, and without real
+    // center data there was nothing for CirclePack to lay the raw
+    // triangulation out with. Passing res.Z through here -- via the same
+    // buildCents1Indexed() helper randomRectangle()/the curve-bounded
+    // randomTri() overload already use -- costs nothing for a caller that
+    // does immediately riffle (parseTriangles() only uses 'cents' to seed
+    // the initial centers; riffle() recomputes them from scratch) and fixes
+    // the case where a caller doesn't. Every input point is guaranteed to
+    // appear in the triangulation here (unlike the planar generators, whose
+    // pruneComplex() step can drop points outside a sparse boundary
+    // sampling) -- every point on a sphere lies on its own 3D convex hull,
+    // so there is no dropped/orphan-point case to worry about for this
+    // generator specifically.
+    auto cents = buildCents1Indexed(res.Z);
+    gop.parseTriangles(tList, &cents);
     gop.indxMatrices();
 
     std::fprintf(stdout, "GOpacker started with random spherical triangulation, %d vertices\n",

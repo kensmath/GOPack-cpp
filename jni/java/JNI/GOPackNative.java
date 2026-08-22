@@ -283,18 +283,18 @@ public final class GOPackNative {
      * boundary), so unlike {@link #computeRandomTri} there is no {@code
      * graphXY}/{@code cent} to pass. {@link RandomComplexResult#geometry} is
      * always Spherical ({@code +1}), and {@link RandomComplexResult#corners}
-     * is always empty. <b>{@link RandomComplexResult#centersRe}/{@link
-     * RandomComplexResult#centersIm} are meaningless here</b> (always {@code
-     * 0}) -- the generator computes each point's (theta, phi) internally but
-     * never carries it through to the returned complex (matching {@code
-     * Packer::randomSphere}'s own behavior); only {@link
-     * RandomComplexResult#flowers}/{@link RandomComplexResult#nodeCount}
-     * matter for this method. {@link RandomComplexResult#radii} is likewise
-     * just the usual uniform {@code 0.5} placeholder.
+     * is always empty. {@link RandomComplexResult#centersRe}/{@link
+     * RandomComplexResult#centersIm} hold each vertex's real {@code
+     * (theta, phi)} position (in {@code projVecToS()}'s polar convention) --
+     * needed to actually display/lay out the raw triangulation, e.g. before
+     * choosing whether to pack it. {@link RandomComplexResult#radii} is, as
+     * with every other raw-triangulation generator in this group, just the
+     * usual meaningless uniform {@code 0.5} placeholder -- ignore it.
      *
      * @param intN number of points to generate (must be &gt;= 4)
-     * @return the generated complex's raw combinatorics. Throws {@link
-     *         GOPackException} if generation fails (e.g. {@code intN < 4}).
+     * @return the generated complex's raw combinatorics and point layout.
+     *         Throws {@link GOPackException} if generation fails (e.g.
+     *         {@code intN < 4}).
      */
     public static native RandomComplexResult computeRandomSphere(int intN)
             throws GOPackException;
