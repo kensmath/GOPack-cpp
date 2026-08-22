@@ -174,13 +174,19 @@ jobs:
   # on a human to rebuild GOPack-cpp and hand-copy files into CirclePack's
   # cdeps/. Deliberately NOT a tagged-per-version release: "latest" always
   # means "whatever master currently builds", trading reproducibility for
-  # simplicity. Runs only on a push to master (not on PRs or other
-  # branches/tags) and only after both build jobs succeed, so a broken build
-  # never overwrites a working "latest" release.
+  # simplicity. Runs on a push to master OR a manual "Run workflow" dispatch
+  # against master (not on PRs or other branches/tags), and only after both
+  # build jobs succeed, so a broken build never overwrites a working "latest"
+  # release. Manual dispatch has to be included here, not just push -- it's
+  # the normal way to force a fresh release without an empty commit, and a
+  # dispatch run that reached this job already proves build/build-linux
+  # passed regardless of which event triggered it.
   release:
     name: Publish "latest" release
     needs: [build, build-linux]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: |
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
       contents: write
