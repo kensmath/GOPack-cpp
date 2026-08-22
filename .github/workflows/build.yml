@@ -166,3 +166,57 @@ jobs:
           name: gopack-cpp-linux-x64
           path: dist/
           if-no-files-found: warn
+
+  # Publishes (or, on every subsequent run, replaces) a single rolling
+  # "latest" GitHub Release carrying the three per-OS dist/ folders as zip
+  # assets -- this is what lets CirclePack's own workflow grab current
+  # GOPack-cpp binaries via `gh release download latest` instead of relying
+  # on a human to rebuild GOPack-cpp and hand-copy files into CirclePack's
+  # cdeps/. Deliberately NOT a tagged-per-version release: "latest" always
+  # means "whatever master currently builds", trading reproducibility for
+  # simplicity. Runs only on a push to master (not on PRs or other
+  # branches/tags) and only after both build jobs succeed, so a broken build
+  # never overwrites a working "latest" release.
+  release:
+    name: Publish "latest" release
+    needs: [build, build-linux]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # Each per-OS artifact (already named gopack-cpp-<name> by the build
+      # jobs above) becomes a same-named .zip -- this is the file-naming
+      # contract CirclePack's fetch step expects.
+      - name: Zip each platform's dist folder into a release asset
+        run: |
+          set -e
+          cd artifacts
+          for d in */; do
+            name="${d%/}"
+            (cd "$name" && zip -rq "../${name}.zip" .)
+          done
+          ls -la *.zip
+
+      # Rolls the release forward: deletes the previous "latest" release and
+      # tag (if any) and recreates both fresh, rather than trying to append
+      # to / overwrite assets in place -- simplest way to guarantee stale
+      # per-OS assets never linger alongside new ones.
+      - name: Replace the rolling "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          if gh release view latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          fi
+          gh release create latest artifacts/*.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Latest build" \
+            --target "$GITHUB_SHA" \
+            --notes "Automatically published from commit ${GITHUB_SHA} on ${GITHUB_REF_NAME}. This release is replaced on every push to ${GITHUB_REF_NAME} -- don't depend on it for reproducible builds; build from source at a specific commit instead."
