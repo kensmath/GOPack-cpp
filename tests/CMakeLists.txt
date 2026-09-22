@@ -11,6 +11,10 @@ add_executable(test_polygonal test_polygonal.cpp)
 target_link_libraries(test_polygonal PRIVATE gopack_core)
 add_test(NAME polygonal COMMAND test_polygonal)
 
+add_executable(test_orthopack test_orthopack.cpp)
+target_link_libraries(test_orthopack PRIVATE gopack_core)
+add_test(NAME orthopack COMMAND test_orthopack)
+
 add_executable(test_loadcomplex test_loadcomplex.cpp)
 target_link_libraries(test_loadcomplex PRIVATE gopack_core)
 add_test(NAME loadcomplex COMMAND test_loadcomplex)

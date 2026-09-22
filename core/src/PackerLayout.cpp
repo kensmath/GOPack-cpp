@@ -23,8 +23,10 @@ int Packer::setMode(int mdIn, const std::vector<Index>& crns, const std::vector<
     }
 
     int m = std::max(mdIn, 1);
-    if (m < 1 || m > 2) {
-        std::fprintf(stderr, "Mode choices: 1 = max packing, 2 = polygonal packing.\n");
+    if (m < 1 || (m > 2 && m != 4)) {
+        std::fprintf(stderr,
+                     "Mode choices: 1 = max packing, 2 = polygonal packing, "
+                     "4 = orthopack (euclidean disc packing, boundary orthogonal to unit circle).\n");
         return -1;
     }
     int md = m;
@@ -36,6 +38,44 @@ int Packer::setMode(int mdIn, const std::vector<Index>& crns, const std::vector<
     }
 
     if (m == 1) {
+        vAims.assign(static_cast<size_t>(nodeCount) + 1, kTwoPi);
+        for (Index w = 1; w <= nodeCount; ++w) {
+            if (bdryFlags[w] != 0) vAims[w] = -1.0;
+        }
+        mode = md;
+        std::fprintf(stderr, "Mode is set to %s\n", kPackModes[mode - 1]);
+        return md;
+    }
+
+    // ---- m == 4: orthopack (new; see setOrthoCenters()'s doc comment and
+    // the "MODE 4" module comment in Packer.h) ----
+    if (m == 4) {
+        // "Triangulates a disc" check (see setMode()'s own doc comment):
+        // complexCount() has already rejected a malformed/disconnected
+        // boundary walk by the time any caller could reach setMode(), so the
+        // one thing left to check here is that there IS a boundary at all --
+        // a closed/spherical complex (bdryCount==0) has no boundary circles
+        // to lay out orthogonally in the first place.
+        if (bdryCount <= 0) {
+            std::fprintf(stderr,
+                         "orthopack requires the complex to triangulate a disc (a nonempty "
+                         "boundary) -- this complex is closed (spherical), with no boundary.\n");
+            mode = -1;
+            return -1;
+        }
+
+        // Deliberate deviation from GOPacker.m, same rationale as mode 2
+        // below: orthopack always produces a euclidean packing (boundary
+        // circles orthogonal to the unit circle is inherently a euclidean
+        // notion), regardless of what geometry the input was read as.
+        hes = Geometry::Euclidean;
+
+        // Same vAims convention as mode 1 (interior target angle sum 2*pi;
+        // boundary vertices get the -1 "free" sentinel setEffective() already
+        // branches on) -- orthopack's boundary radii, like mode 1's, are
+        // determined by the packing process (Steps A/B/C) rather than by a
+        // fixed target, so they need the same treatment mode 1 gets, not
+        // mode 2's fixed corner/side angle targets.
         vAims.assign(static_cast<size_t>(nodeCount) + 1, kTwoPi);
         for (Index w = 1; w <= nodeCount; ++w) {
             if (bdryFlags[w] != 0) vAims[w] = -1.0;
@@ -292,6 +332,10 @@ int Packer::setMode(int mdIn, const std::vector<Index>& crns, const std::vector<
 void Packer::layoutBdry() {
     if (mode == 2) {
         setPolyCenters();
+        return;
+    }
+    if (mode == 4) {
+        setOrthoCenters();
         return;
     }
     setHoroCenters();
@@ -579,6 +623,95 @@ void Packer::setHoroCenters() {
         Scalar d = 1.0 - r2;
         localcenters[bdryList[static_cast<size_t>(k) - 1]] =
             Complex(d * std::cos(arg), d * std::sin(arg));
+    }
+}
+
+// setOrthoCenters -- new, no MATLAB counterpart. See the doc comment on the
+// declaration in Packer.h for the full derivation; this is the euclidean
+// counterpart of setHoroCenters() immediately above (structured the same
+// way -- gather boundary radii, Newton-solve for a common-circle radius R,
+// normalize, walk bdryList placing centers), except boundary circles land
+// orthogonal to the common (unit, after normalization) circle instead of
+// internally tangent to it.
+void Packer::setOrthoCenters() {
+    if (bdryCount < 3) {
+        std::fprintf(stderr, "setOrthoCenters: need at least 3 boundary vertices\n");
+        return;
+    }
+
+    // gather boundary radii, closed (r[bdryCount+1] duplicates r[1], as in
+    // setHoroCenters())
+    Scalar sumR = 0.0;
+    Scalar minrad = 0.0;
+    std::vector<Scalar> r(static_cast<size_t>(bdryCount) + 2, 0.0); // 1-indexed, closed
+    for (Index j = 1; j <= bdryCount; ++j) {
+        r[j] = localradii[bdryList[static_cast<size_t>(j) - 1]];
+        if (r[j] > minrad) minrad = r[j];
+        sumR += r[j];
+    }
+    r[bdryCount + 1] = r[1];
+
+    const Index n = bdryCount;
+    const Scalar target = static_cast<Scalar>(n - 2) * kPi;
+
+    // Initial guess for R: the root satisfies 0 < R < sumR/pi (see the
+    // header doc comment), so start below that bound; minrad guards against
+    // sumR/pi landing at (numerically) zero for degenerate all-but-zero
+    // radii.
+    Scalar R = 0.5 * sumR / kPi;
+    if (!(R > 0.0) || R < 1e-9 * std::max(minrad, 1.0)) {
+        R = (minrad > 0.0) ? 0.5 * minrad : 1.0;
+    }
+
+    // Newton iteration to solve sum_j 2*atan(R/r_j) = (n-2)*pi for R (see
+    // the header doc comment for why this has a unique positive root).
+    // Structured identically to setHoroCenters()'s own Newton loop just
+    // above (same clamp-the-step/trys<100/convergence-tolerance shape), just
+    // with this mode's own fvalue/fprime.
+    int trys = 0;
+    bool keepon = true;
+    while (keepon && trys < 100) {
+        trys++;
+        Scalar fvalue = -target;
+        Scalar fprime = 0.0;
+        for (Index j = 1; j <= n; ++j) {
+            fvalue += 2.0 * std::atan(R / r[j]);
+            fprime += 2.0 * r[j] / (r[j] * r[j] + R * R);
+        }
+        Scalar newR = R - fvalue / fprime;
+        if (newR < R / 2.0) newR = R / 2.0;
+        if (newR > 2.0 * R) newR = 2.0 * R;
+        if (std::abs(newR - R) < 1e-9 * std::max<Scalar>(R, 1.0)) keepon = false;
+        R = newR;
+    }
+
+    // Normalize so the common orthogonal circle is exactly the unit circle:
+    // scaling every radius (and R itself) by the same factor 1/R preserves
+    // both the orthogonality identity d^2=R^2+r^2 and tangency (both are
+    // similarity-invariant), so after this rescaling the common circle's
+    // radius is exactly 1.
+    for (Index v = 1; v <= nodeCount; ++v) localradii[v] /= R;
+    for (Index j = 1; j <= bdryCount + 1; ++j) r[j] /= R;
+
+    // d[j] = distance from the origin to boundary circle j's center, on the
+    // now-unit-circle-normalized scale (R==1): d^2 = 1 + r_j^2.
+    std::vector<Scalar> d(static_cast<size_t>(bdryCount) + 2, 0.0);
+    for (Index j = 1; j <= bdryCount + 1; ++j) d[j] = std::sqrt(1.0 + r[j] * r[j]);
+
+    // Walk cclw around bdryList, starting with bdryList[0] straight up
+    // (matching setHoroCenters()'s own starting orientation), placing each
+    // subsequent center at the cumulative angle from the law-of-cosines
+    // formula above.
+    localcenters[bdryList[0]] = Complex(0.0, d[1]);
+    Scalar arg = kPi / 2.0;
+    for (Index k = 2; k <= bdryCount; ++k) {
+        Scalar r1 = r[static_cast<size_t>(k) - 1];
+        Scalar r2 = r[static_cast<size_t>(k)];
+        Scalar cosTheta = (1.0 - r1 * r2) / (d[static_cast<size_t>(k) - 1] * d[static_cast<size_t>(k)]);
+        cosTheta = std::max(-1.0, std::min(1.0, cosTheta)); // guard against roundoff past +-1
+        arg += std::acos(cosTheta);
+        localcenters[bdryList[static_cast<size_t>(k) - 1]] =
+            d[static_cast<size_t>(k)] * Complex(std::cos(arg), std::sin(arg));
     }
 }
 

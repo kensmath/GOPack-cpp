@@ -8,7 +8,7 @@ library for Java (via JNI) and as standalone Windows/macOS executables.
 **License:** GPL-3.0, same as the original GOPack (this is a derivative
 work; see LICENSE.md).
 
-## Status: max-pack and polygonal/rectangle modes ported
+## Status: max-pack, polygonal/rectangle, and orthopack modes ported
 
 This is a **direct, line-by-line port**, not a reimplementation from the
 paper's description. The translation was done by reading every `.m` file in
@@ -52,7 +52,24 @@ identical to the source).
   shared `continueRiffle`/`layoutCenters`/`setEffective` iteration below
   needed no changes to support this -- `setEffective` already branches on
   the sign of `vAims`, which `setMode` sets appropriately for either mode.
-- the core iteration (used by both modes): `continueRiffle` / `layoutCenters`
+- **Mode 4 (orthopack) -- new, not part of the original MATLAB source**:
+  a euclidean packing of a disc triangulation whose boundary circles are
+  each orthogonal to the unit circle (rather than mode 1's horocycles,
+  internally tangent to it). `setMode` mode 4 (vAims set exactly as for
+  mode 1 -- interior `2*pi`, boundary "free" -- and `hes` forced to
+  Euclidean, same rationale as mode 2), `layoutBdry` dispatching to the new
+  `setOrthoCenters` (a Newton solve for the common orthogonal circle's
+  radius, then a boundary walk placing each circle by the resulting
+  orthogonality/tangency identities -- see the doc comment on
+  `Packer::setOrthoCenters` in `Packer.h` for the full derivation). Exposed
+  from the CLI via `--orthopack` -- see "CLI usage" below. Implements the
+  disc-packing case (Section 3.1) of "A Linearized Circle Packing
+  Algorithm" (Collins/Orick/Stephenson): Step A (boundary layout) is
+  `setOrthoCenters`; Steps B (`layoutCenters`, the Tutte/harmonic interior
+  embedding) and C (`setEffective`, the effective-radius update) are the
+  same shared iteration every mode already uses, unchanged. See "Notes on
+  mode 4 (orthopack)" below.
+- the core iteration (used by all modes): `continueRiffle` / `layoutCenters`
   (the sparse linear solve) / `setEffective` / `updateVdata` / `visualErrors`
 - `riffle`, `reapResults`, `angsumErrors`, `packStatus`
 - `writepack` / `writeEucl`, including hyperbolic and spherical output
@@ -119,6 +136,41 @@ files), so porting them is a bounded follow-up, not new research.
   euclidean shape, so leaving `hes` at its original (hyperbolic/spherical)
   value would make `writepack()` apply a conversion to already-euclidean
   polygon output that was never intended for it.
+
+### Notes on mode 4 (orthopack)
+
+- Unlike every other mode, mode 4 has **no MATLAB counterpart at all** --
+  see the "MODE 4" module comment in `Packer.h` and the doc comment on
+  `Packer::setOrthoCenters` for the full derivation and references.
+- `setOrthoCenters` mirrors `setHoroCenters`'s own structure closely
+  (gather boundary radii, Newton-solve for a common-circle radius, rescale
+  to normalize that circle to the unit circle, walk `bdryList` placing
+  centers) so the two can be read side by side, even though the underlying
+  geometry -- orthogonal circles vs. internally tangent horocycles -- is
+  different, and so is the Newton-solved equation
+  (`sum(2*atan(R/r_j)) == (n-2)*pi` here, vs. `setHoroCenters`'s own
+  tangency-based `acos` sum).
+- `setHoroCenters` special-cases `bdryCount<=3` (a fixed canonical
+  horocycle size, independent of the given radii -- a genuine degeneracy of
+  3 mutually tangent ideal-triangle horocycles in hyperbolic geometry).
+  `setOrthoCenters` has no equivalent special case: its Newton solve has a
+  unique root for any `bdryCount>=3` (the residual is monotonically
+  increasing in `R`, from `-(n-2)*pi` at `R=0` to `+2*pi` as `R->infinity`),
+  and the resulting geometry genuinely depends on the given radii even for
+  `n==3`, so there's no degenerate case to shortcut.
+- `setMode(4, ...)` requires the complex to triangulate a disc
+  (`bdryCount>0`); a closed/spherical complex is rejected with a
+  diagnostic. `complexCount()` already rejects a malformed or
+  disconnected/multi-component boundary (returns an error rather than a
+  usable `bdryList`) before `setMode()` can even be reached -- see that
+  function's own doc comment -- so between the two, "check that the given
+  triangulation triangulates a disc" is already handled by the time
+  `setOrthoCenters()` itself runs.
+- Covered by `tests/test_orthopack.cpp`: `setOrthoCenters()` in isolation
+  with deliberately unequal boundary radii (checking the orthogonality and
+  tangency identities to near machine precision, independent of any riffle
+  convergence), and the same hex-flower fixture `test_polygonal.cpp` uses,
+  riffled through the normal `setMode(4, ...)`/`riffle()` path.
 
 ### Notes on `parse_triangles`/`pruneComplex`/`rand_bdry_pts`
 
@@ -250,19 +302,23 @@ files), so porting them is a bounded follow-up, not new research.
 
 ## What has -- and hasn't -- been verified
 
-- Ten regression tests (`tests/test_hex_flower.cpp`,
+- Eleven regression tests (`tests/test_hex_flower.cpp`,
   `tests/test_readpack_roundtrip.cpp`, `tests/test_polygonal.cpp`,
-  `tests/test_loadcomplex.cpp`, `tests/test_sphere_normalize.cpp`,
-  `tests/test_parse_triangles.cpp`, `tests/test_prune_complex.cpp`,
-  `tests/test_rand_bdry_pts.cpp`, `tests/test_random_gen.cpp`,
-  `tests/test_random_packers.cpp`) exercise the pipeline on the classical
-  "hex flower" complex (one interior vertex of degree 6 ringed by 6 boundary
-  vertices) in both modes, checking angle-sum convergence and symmetric
-  radii for mode 1, a read/riffle/write/re-read round trip, that a 4-corner
-  rectangle layout (mode 2) stays finite, positive, and rectangle-shaped
-  after riffling, that `loadComplex()` produces a packing that agrees with a
-  hand-built (readpack()-equivalent) `Packer` to within 1e-9 -- including
-  its alpha-resolution and optional-radii/vAims-override paths -- that
+  `tests/test_orthopack.cpp`, `tests/test_loadcomplex.cpp`,
+  `tests/test_sphere_normalize.cpp`, `tests/test_parse_triangles.cpp`,
+  `tests/test_prune_complex.cpp`, `tests/test_rand_bdry_pts.cpp`,
+  `tests/test_random_gen.cpp`, `tests/test_random_packers.cpp`) exercise the
+  pipeline on the classical "hex flower" complex (one interior vertex of
+  degree 6 ringed by 6 boundary vertices) in every mode, checking angle-sum
+  convergence and symmetric radii for mode 1, a read/riffle/write/re-read
+  round trip, that a 4-corner rectangle layout (mode 2) stays finite,
+  positive, and rectangle-shaped after riffling, that an orthopack (mode 4)
+  boundary -- both in isolation with unequal radii, and riffled through the
+  hex-flower fixture -- stays exactly orthogonal to the unit circle and
+  tangent between neighbors (`tests/test_orthopack.cpp`), that
+  `loadComplex()` produces a packing that agrees with a hand-built
+  (readpack()-equivalent) `Packer` to within 1e-9 -- including its
+  alpha-resolution and optional-radii/vAims-override paths -- that
   `Packer::centers`/`radii` for a real 1000-vertex spherical triangulation
   (`tests/data/sphtest1000.p`) are already centroid-normalized right after
   `riffle()` with no call to `writepack()`, that `parse_triangles` correctly
@@ -414,6 +470,7 @@ Build options (pass as `-D<OPTION>=OFF` to disable):
 ```
 gopack input.p -o output.p [--passes 200] [--eucl-out]
 gopack input.p -o output.p --polygon [--corners v1,v2,v3,v4] [--angles a1,a2,a3,a4]
+gopack input.p -o output.p --orthopack [--passes 200]
 gopack --random-disc N -o output.p [--passes 200] [--eucl-out]
 gopack --random-sphere N -o output.p [--passes 200]
 gopack --random-square N -o output.p [--passes 200] [--eucl-out]
@@ -431,6 +488,15 @@ corner angles in radians; if omitted, all corners get equal angles (e.g.
 exactly `pi/2` each for a 4-corner input, which is what triggers the
 rectangle-specific layout in `setRectCenters`). With exactly 4 corners, the
 CLI also prints the resulting aspect ratio (`getAspect`).
+
+`--orthopack` switches to mode 4 ("orthopack" -- see "Notes on mode 4
+(orthopack)" above): a euclidean packing whose boundary circles are each
+orthogonal to the unit circle, instead of mode 1's horocycles (internally
+tangent to it). `<input.p>` must triangulate a disc (a nonempty, single-
+component boundary); `--orthopack` is mutually exclusive with `--polygon`,
+takes no `--corners`/`--angles` (mode 4 has no notion of corners), and the
+output is always written euclidean regardless of `--eucl-out` (`setMode(4,
+...)` forces `hes=Euclidean`, same as `--polygon`'s mode 2).
 
 `--random-disc`/`--random-sphere`/`--random-square`/`--random-rectangle`
 generate a fresh "geometrically random" triangulation (see
@@ -523,10 +589,11 @@ remains the right choice when the data genuinely starts out as a file (a
 `*.p` on disk with no in-memory representation yet).
 
 Only mode 1 (maximal packing) is exposed through this JNI bridge so far;
-mode 2 (polygonal/rectangle) is ported in the C++ core (both `readpack()`
-and `loadComplex()` load a complex the same way regardless of which mode you
-later select with `setMode`) but only reachable today via the CLI's
-`--polygon` flag -- adding `computeMaximalPackingFromComplex`'s mode-2
-counterpart is a small follow-up whenever you need it (same `loadComplex`
-plumbing, just `setMode(2, corners, angles)` instead of `setMode(1)` before
-`riffle`).
+mode 2 (polygonal/rectangle) and mode 4 (orthopack) are both ported in the
+C++ core (`readpack()`/`loadComplex()` load a complex the same way
+regardless of which mode you later select with `setMode`) but only
+reachable today via the CLI's `--polygon`/`--orthopack` flags -- adding
+`computeMaximalPackingFromComplex` counterparts for either is a small
+follow-up whenever you need it (same `loadComplex` plumbing, just
+`setMode(2, corners, angles)` or `setMode(4)` instead of `setMode(1)`
+before `riffle`).

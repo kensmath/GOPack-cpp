@@ -2,12 +2,24 @@
 //
 // Usage: gopack <input.p> -o <output.p> [--passes 200] [--eucl-out]
 //        gopack <input.p> -o <output.p> --polygon [--corners v1,v2,v3,v4] [--angles a1,a2,a3,a4]
+//        gopack <input.p> -o <output.p> --orthopack [--passes 200]
 //        gopack --random-disc N -o <output.p> [--passes 200] [--eucl-out]
 //        gopack --random-sphere N -o <output.p> [--passes 200]
 //        gopack --random-square N -o <output.p> [--passes 200] [--eucl-out]
 //        gopack --random-rectangle N[,aspect[,bdryN]] -o <output.p> [--passes 200] [--eucl-out]
 //        gopack --random-tri intN,bdryN --graph x1,y1,x2,y2,... -o <output.p> [--cent cx,cy]
 //               [--passes 200] [--eucl-out]
+//
+// --orthopack switches to mode 4 ("orthopack" -- setMode's mode 4, new in
+// this port, no MATLAB counterpart): a euclidean packing of a disc
+// triangulation whose boundary circles are each orthogonal to the unit
+// circle (rather than mode 1's horocycles, internally tangent to it) --
+// see Packer::setOrthoCenters()'s doc comment in Packer.h for the boundary-
+// layout math, and Section 3.1 of "A Linearized Circle Packing Algorithm"
+// for the disc-packing iteration this slots Step A into. Mutually exclusive
+// with --polygon (mode 2); the output is always written as euclidean
+// (setMode(4, ...) forces hes=Euclidean the same way setMode(2, ...) does),
+// so --eucl-out is a no-op alongside it.
 //
 // Loads a *.p triangulation/packing file, or -- with one of the
 // --random-disc/--random-sphere/--random-square/--random-rectangle/
@@ -49,6 +61,7 @@ void printUsage(const char* argv0) {
                  "Usage: %s <input.p> -o <output.p> [--passes N] [--eucl-out]\n"
                  "       %s <input.p> -o <output.p> --polygon [--corners v1,v2,v3,...] "
                  "[--angles a1,a2,a3,...]\n"
+                 "       %s <input.p> -o <output.p> --orthopack [--passes N]\n"
 #ifdef GOPACK_HAVE_RANDOM_GEN
                  "       %s --random-disc N -o <output.p> [--passes N] [--eucl-out]\n"
                  "       %s --random-sphere N -o <output.p> [--passes N]\n"
@@ -66,6 +79,12 @@ void printUsage(const char* argv0) {
                  "  --angles a1,a2,...  comma-separated target corner angles (radians), matching\n"
                  "                      --corners in count and order; if omitted, corners get\n"
                  "                      equal angles (e.g. pi/2 each for a 4-corner rectangle)\n"
+                 "  --orthopack         use orthogonal disc-packing mode (setMode mode 4):\n"
+                 "                      a euclidean packing whose boundary circles are each\n"
+                 "                      orthogonal to the unit circle, instead of mode 1's\n"
+                 "                      horocycles (internally tangent to it); requires\n"
+                 "                      <input.p> to triangulate a disc, and is mutually\n"
+                 "                      exclusive with --polygon\n"
 #ifdef GOPACK_HAVE_RANDOM_GEN
                  "  --random-disc N            generate a random triangulation of the unit disc\n"
                  "                             with N total points instead of reading <input.p>\n"
@@ -94,9 +113,9 @@ void printUsage(const char* argv0) {
 #endif
                  ,
 #ifdef GOPACK_HAVE_RANDOM_GEN
-                 argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+                 argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 #else
-                 argv0, argv0);
+                 argv0, argv0, argv0);
 #endif
 }
 
@@ -258,6 +277,7 @@ int main(int argc, char** argv) {
     int passes = 200;
     bool euclOut = false;
     bool polygonMode = false;
+    bool orthoMode = false;
     std::vector<gopack::Index> corners;
     std::vector<gopack::Scalar> angles;
 
@@ -271,6 +291,8 @@ int main(int argc, char** argv) {
             euclOut = true;
         } else if (arg == "--polygon") {
             polygonMode = true;
+        } else if (arg == "--orthopack") {
+            orthoMode = true;
         } else if (arg == "--corners" && i + 1 < argc) {
             corners = parseIndexList(argv[++i]);
         } else if (arg == "--angles" && i + 1 < argc) {
@@ -305,6 +327,11 @@ int main(int argc, char** argv) {
         return 2;
     }
 #endif
+    if (polygonMode && orthoMode) {
+        std::fprintf(stderr, "gopack: --polygon and --orthopack are mutually exclusive\n");
+        printUsage(argv[0]);
+        return 2;
+    }
 
     try {
         gopack::Packer packer;
@@ -370,6 +397,16 @@ int main(int argc, char** argv) {
                 // data indxMatrices() built inside readpack() is still valid.
                 if (packer.setMode(2, corners, angles) < 0) {
                     std::fprintf(stderr, "gopack: failed to set polygonal packing mode\n");
+                    return 1;
+                }
+            } else if (orthoMode) {
+                // Same note as --polygon above: setMode(4, ...) only touches
+                // boundary layout (vAims), not layoutVerts/rimVerts, so the
+                // indxMatrices() data from readpack() is still valid.
+                // setMode(4, ...) itself checks that the complex triangulates
+                // a disc (bdryCount>0) and reports why if it doesn't.
+                if (packer.setMode(4) < 0) {
+                    std::fprintf(stderr, "gopack: failed to set orthopack packing mode\n");
                     return 1;
                 }
             } else {

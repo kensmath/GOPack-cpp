@@ -39,6 +39,22 @@
 // itself) only exist when GOPACK_HAVE_RANDOM_GEN is defined (see
 // core/CMakeLists.txt's GOPACK_BUILD_RANDOM_GEN option, default ON).
 //
+// MODE 4 ("orthopack") -- setMode mode 4, layoutBdry / setOrthoCenters --
+// is **not** part of the original GOPacker.m/GOPack MATLAB source (unlike
+// every mode above, which is a line-by-line port). It's a new euclidean
+// disc-packing mode: instead of mode 1's horocycles (boundary circles
+// internally tangent to a common circle -- i.e. a hyperbolic maximal
+// packing realized in the euclidean disc model), mode 4 lays out the
+// boundary circles as full euclidean circles, each orthogonal to a common
+// circle (normalized to be the unit circle) and tangent to its cclw
+// neighbor, per the given boundary radii. See setOrthoCenters()'s own doc
+// comment for the closed-form boundary layout this uses, and Section 3.1 of
+// "A Linearized Circle Packing Algorithm" (Collins/Orick/Stephenson) for
+// the disc-packing iteration (Steps A/B/C) this slots into -- only Step A
+// (the boundary layout) differs from mode 1; Steps B (layoutCenters, the
+// Tutte/harmonic interior embedding) and C (setEffective, the effective-
+// radius update) are shared verbatim, unchanged, with both modes.
+//
 // INPUT: readpack() (the *.p FLOWERS format) is one way to get a complex
 // into a Packer; loadComplex() is the other -- it has no MATLAB counterpart,
 // and exists purely for embedding (JNI/library callers that already hold
@@ -199,6 +215,53 @@ public:
     // setHoroCenters.m
     void setHoroCenters();
 
+    // setOrthoCenters -- **new, no MATLAB counterpart** (see the "MODE 4"
+    // module comment above). layoutBdry() calls this instead of
+    // setHoroCenters() when mode==4 ("orthopack"). Lays out the boundary
+    // circles (radii taken from localradii, matching setHoroCenters()'s own
+    // convention) as full euclidean circles, each orthogonal to a common
+    // circle centered at the origin and tangent to its counterclockwise
+    // neighbor (bdryList order), then normalizes so that common circle is
+    // exactly the unit circle -- the euclidean analog of setHoroCenters()'s
+    // horocycle layout (there, boundary circles are internally tangent to a
+    // common circle, normalized to the unit circle instead of orthogonal to
+    // it).
+    //
+    // Given boundary radii r_1..r_n (n = bdryCount, cclw around bdryList), a
+    // circle of radius r centered at distance d from the origin is
+    // orthogonal to a circle of radius R centered at the origin iff
+    // d^2 = R^2 + r^2 (a standard orthogonality identity: the tangent length
+    // from the origin to the r-circle is R). For two such circles (radii
+    // r_j, r_{j+1}) that are also externally tangent to each other
+    // (|z_j - z_{j+1}| = r_j + r_{j+1}), the law of cosines gives the angle
+    // theta_j between their center directions as seen from the origin:
+    //   cos(theta_j) = (R^2 - r_j*r_{j+1}) / sqrt((R^2+r_j^2)*(R^2+r_{j+1}^2))
+    // and the boundary closes up into a simple cclw loop around the origin
+    // exactly when sum_{j=1}^{n} theta_j = 2*pi (indices mod n). R is found
+    // by Newton's method (mirroring setHoroCenters()'s own Newton solve for
+    // its analogous tangency-closure radius) from the equivalent identity
+    // (via theta_j's additive decomposition into per-circle "tangent
+    // half-angles" arctan(r_j/R)):
+    //   sum_{j=1}^{n} 2*arctan(R/r_j) = (n-2)*pi,
+    // which has a unique root 0 < R < sum(r_j)/pi (the left side is
+    // monotonically increasing in R, from -(n-2)*pi at R=0 to +2*pi as
+    // R->infinity). Once R is found, every radius (interior and boundary) is
+    // divided by R -- a similarity transform, so it preserves both the
+    // orthogonality and tangency identities above while making the common
+    // orthogonal circle exactly the unit circle -- and the (now unit-circle-
+    // normalized) boundary radii are placed via the cos(theta_j) formula
+    // above, walking cclw around bdryList starting with bdryList[0] straight
+    // up (matching setHoroCenters()'s own starting orientation).
+    //
+    // Unlike setHoroCenters(), there is no bdryCount<=3 special case: the
+    // Newton solve above is well-posed (unique root, monotonic residual) for
+    // any bdryCount>=3, and -- unlike setHoroCenters()'s n<=3 case, which
+    // collapses to a fixed canonical horocycle size independent of the given
+    // radii (a genuine degeneracy of 3 mutually tangent ideal-triangle
+    // horocycles in hyperbolic geometry) -- the resulting euclidean geometry
+    // here always depends on the given radii, even for n==3.
+    void setOrthoCenters();
+
     // continueRiffle.m
     Index continueRiffle(int passNum);
 
@@ -216,17 +279,31 @@ public:
     void setRectCenters();
     void setPolyCenters();
 
-    // setMode.m. mdIn: 1 = max pack, 2 = polygonal. For mode 2, 'crns' is an
-    // optional list of corner vertices (by original vertex index, in cclw
+    // setMode.m, extended with mode 4 ("orthopack" -- see setOrthoCenters()
+    // and the "MODE 4" module comment above; not part of GOPacker.m's own
+    // mode set, which stops at what this port calls modes 1/2). mdIn: 1 =
+    // max pack, 2 = polygonal, 4 = orthopack (euclidean disc packing with
+    // boundary circles orthogonal to the unit circle). For mode 2, 'crns' is
+    // an optional list of corner vertices (by original vertex index, in cclw
     // order); if empty, corners are inferred from 'vlist' or else chosen
     // pseudo-randomly, mirroring GOPacker.m's nargin<3 behavior (a by-value
     // C++ vector can't distinguish "omitted" from "explicitly empty" the
     // way MATLAB's nargin can, so an empty 'crns' here always means
     // "figure out the corners for me", the more useful default). 'angs' is
-    // an optional matching list of corner target angles. NOTE: entering
-    // mode 2 always resets 'hes' to Euclidean (a deliberate deviation from
-    // GOPacker.m -- see the comment in setMode's .cpp definition), even if
-    // the packing was originally read as hyperbolic or spherical.
+    // an optional matching list of corner target angles; both are ignored
+    // for mode 4, which -- like mode 1 -- has no notion of corners (vAims is
+    // set the same way as mode 1: interior 2*pi, boundary -1, so setEffective's
+    // existing sign(vAims) branch, shared verbatim by every mode, needs no
+    // change). NOTE: entering mode 2 or mode 4 always resets 'hes' to
+    // Euclidean (a deliberate deviation from GOPacker.m -- see the comment
+    // in setMode's .cpp definition), even if the packing was originally read
+    // as hyperbolic or spherical. Mode 4 additionally requires the complex
+    // to triangulate a disc (bdryCount>0 -- i.e. not a closed/spherical
+    // complex); complexCount() has already rejected a malformed/disconnected
+    // boundary by the time setMode() can be reached (see its own doc
+    // comment), so together these two checks are what "check that the given
+    // triangulation triangulates a disc" (mode 4's only real precondition)
+    // amounts to.
     int setMode(int mdIn, const std::vector<Index>& crns = {}, const std::vector<Scalar>& angs = {});
 
     // layoutCenters.m
