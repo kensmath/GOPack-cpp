@@ -33,10 +33,10 @@ jobs:
             cmake_extra_args: '-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"'
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up JDK (for the JNI target)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -59,20 +59,30 @@ jobs:
         shell: cmd
         continue-on-error: true
 
-      # Informational only (continue-on-error) rather than a hard gate --
-      # dumpbin's exact PATH availability on windows-latest isn't guaranteed
-      # to stay stable across runner image updates, and we don't want a
-      # tooling hiccup here to fail the whole job. What this is checking:
-      # CMakeLists.txt now statically links the MSVC runtime (/MT, via
-      # CMAKE_MSVC_RUNTIME_LIBRARY) specifically so gopack_jni.dll doesn't
-      # need the Visual C++ Redistributable on a clean end-user machine --
-      # if that ever regresses, VCRUNTIME140.dll/MSVCP140.dll will reappear
-      # in this dependency listing.
+      # What this is checking: CMakeLists.txt statically links the MSVC
+      # runtime (/MT, via CMAKE_MSVC_RUNTIME_LIBRARY) specifically so
+      # gopack_jni.dll doesn't need the Visual C++ Redistributable on a clean
+      # end-user machine -- if that ever regresses, VCRUNTIME140.dll /
+      # MSVCP140.dll will reappear in the dependency listing and this fails.
+      # dumpbin is NOT on the PATH of a plain runner shell (only inside a VS
+      # Developer Command Prompt), so it's located via vswhere, which ships
+      # at a fixed path on every windows-latest image. Now a hard gate, like
+      # the Linux ldd check below.
       - name: Verify static CRT linking (Windows)
         if: runner.os == 'Windows'
-        run: dumpbin /dependents dist\gopack_jni.dll
-        shell: cmd
-        continue-on-error: true
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -products * -find "VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          if (-not $dumpbin) { Write-Output "::error::dumpbin.exe not found via vswhere"; exit 1 }
+          if (-not (Test-Path dist\gopack_jni.dll)) { Write-Output "::error::dist\gopack_jni.dll is missing -- packaging step failed"; exit 1 }
+          $deps = & $dumpbin /nologo /dependents dist\gopack_jni.dll | Out-String
+          Write-Output $deps
+          if ($deps -match '(?i)(vcruntime|msvcp)\d+d?\.dll') {
+            Write-Output "::error::gopack_jni.dll depends on the dynamic MSVC runtime -- static CRT linking regressed."
+            exit 1
+          }
+          Write-Output "OK: gopack_jni.dll has no dynamic MSVC runtime dependency."
 
       - name: Package artifacts (macOS)
         if: runner.os == 'macOS'
@@ -84,7 +94,7 @@ jobs:
         continue-on-error: true
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: gopack-cpp-${{ matrix.name }}
           path: dist/
@@ -93,7 +103,7 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Build inside an old-glibc container (manylinux2014 = CentOS 7,
       # glibc 2.17 -- the same baseline the Python packaging ecosystem uses
@@ -161,7 +171,7 @@ jobs:
           ldd dist/libgopack_jni.so
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: gopack-cpp-linux-x64
           path: dist/
@@ -192,7 +202,7 @@ jobs:
       contents: write
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
 

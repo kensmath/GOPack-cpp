@@ -62,7 +62,8 @@ identical to the source).
   radius, then a boundary walk placing each circle by the resulting
   orthogonality/tangency identities -- see the doc comment on
   `Packer::setOrthoCenters` in `Packer.h` for the full derivation). Exposed
-  from the CLI via `--orthopack` -- see "CLI usage" below. Implements the
+  from the CLI via `--orthopack` (see "CLI usage" below) and from Java via
+  `computeOrthopackFromComplex` (see "Java usage" below). Implements the
   disc-packing case (Section 3.1) of "A Linearized Circle Packing
   Algorithm" (Collins/Orick/Stephenson): Step A (boundary layout) is
   `setOrthoCenters`; Steps B (`layoutCenters`, the Tutte/harmonic interior
@@ -166,6 +167,13 @@ files), so porting them is a bounded follow-up, not new research.
   function's own doc comment -- so between the two, "check that the given
   triangulation triangulates a disc" is already handled by the time
   `setOrthoCenters()` itself runs.
+- Exposed via JNI as `computeOrthopackFromComplex` (`jni/cpp/JNI_GOPackNative.cpp`
+  / `jni/java/JNI/GOPackNative.java`) -- an in-memory-complex entry point
+  mirroring `computeMaximalPackingFromComplex` exactly (same inputs, same
+  3-row `double[][]` result shape), just calling `setMode(4)` instead of
+  `setMode(1)` before `riffle()`; unlike `computePolygonalPackingFromComplex`
+  it takes no extra corners/angles parameters, since orthopack (like mode 1)
+  has no notion of corners. See "Java usage" below.
 - Covered by `tests/test_orthopack.cpp`: `setOrthoCenters()` in isolation
   with deliberately unequal boundary radii (checking the orthogonality and
   tangency identities to near machine precision, independent of any riffle
@@ -544,6 +552,24 @@ double[] radii2 = JNI.GOPackNative.computeMaximalPackingFromComplex(
     /* tolerance (reserved) */ 0.0, /* maxPasses */ 200);
 ```
 
+The same in-memory complex can be packed in polygonal/rectangle mode (mode 2,
+`computePolygonalPackingFromComplex` -- corners/angles as described in that
+method's own Javadoc) or orthopack mode (mode 4, new -- see "Notes on mode 4
+(orthopack)" above) instead of maximal-packing mode:
+
+```java
+// Orthopack (mode 4): euclidean packing, boundary circles orthogonal to the
+// unit circle. Same flowers/geometry inputs as computeMaximalPackingFromComplex
+// above -- no corners/angles, unlike polygonal mode -- and the same 3-row
+// double[][] result shape (radii, center X, center Y). The complex must
+// triangulate a disc (a nonempty boundary); a closed/spherical complex
+// throws GOPackException.
+double[][] ortho = JNI.GOPackNative.computeOrthopackFromComplex(
+    nodeCount, flowers, /* geometry: 0=eucl -1=hyp +1=sph */ 0,
+    /* tolerance (reserved) */ 0.0, /* maxPasses */ 200);
+double[] orthoRadii = ortho[0], orthoCenterX = ortho[1], orthoCenterY = ortho[2];
+```
+
 A third method, `computeRandomTri`, generates a random triangulation of an
 arbitrary closed polygonal region (the JNI counterpart to the CLI's
 `--random-tri`) and computes its maximal packing in one call, and a fourth,
@@ -588,12 +614,16 @@ its cost is close to the packing computation alone. `computeMaximalPacking`
 remains the right choice when the data genuinely starts out as a file (a
 `*.p` on disk with no in-memory representation yet).
 
-Only mode 1 (maximal packing) is exposed through this JNI bridge so far;
-mode 2 (polygonal/rectangle) and mode 4 (orthopack) are both ported in the
-C++ core (`readpack()`/`loadComplex()` load a complex the same way
-regardless of which mode you later select with `setMode`) but only
-reachable today via the CLI's `--polygon`/`--orthopack` flags -- adding
-`computeMaximalPackingFromComplex` counterparts for either is a small
-follow-up whenever you need it (same `loadComplex` plumbing, just
-`setMode(2, corners, angles)` or `setMode(4)` instead of `setMode(1)`
-before `riffle`).
+All three packing modes the C++ core supports are exposed through this JNI
+bridge: mode 1 (`computeMaximalPacking`/`computeMaximalPackingFromComplex`),
+mode 2 (`computePolygonalPackingFromComplex`), and mode 4/orthopack
+(`computeOrthopackFromComplex`) -- each an in-memory-complex entry point
+built the same way (`loadComplex()`, then that mode's own `setMode()` call,
+then `riffle()`), differing only in which `setMode()` call and which extra
+parameters (corners/angles for mode 2; none for modes 1/4) each needs. Only
+mode 1 also has a file-path entry point (`computeMaximalPacking`); modes 2
+and 4 are in-memory-complex only, matching how CirclePack already holds its
+own triangulations -- a file-path counterpart for either would be a small
+follow-up (same `readpack()` plumbing `computeMaximalPacking` already uses)
+if a caller ever needs to feed a `*.p` file straight into polygonal or
+orthopack mode without going through Java first.

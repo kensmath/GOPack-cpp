@@ -310,6 +310,142 @@ Java_JNI_GOPackNative_computeMaximalPackingFromComplex(
     }
 }
 
+// double[][] computeOrthopackFromComplex(int nodeCount, int[][] flowers,
+// int geometry, double tolerance, int maxPasses)
+//
+// Orthopack (mode 4) counterpart to computeMaximalPackingFromComplex above --
+// same in-memory-complex entry point (Packer::loadComplex(), same flowers/
+// geometry convention, same 3-row double[][] result shape), but sets mode 4
+// (Packer::setMode(4), gopack::Packer::setOrthoCenters()) instead of mode 1
+// before riffling: a euclidean packing whose boundary circles are each
+// orthogonal to the unit circle, rather than mode 1's horocycles (internally
+// tangent to it). See setOrthoCenters()'s doc comment in Packer.h for the
+// boundary-layout math, and the "MODE 4" module comment there for how this
+// slots into the disc-packing iteration -- this is new to this port, with no
+// MATLAB counterpart, unlike mode 1/2.
+//
+// Unlike computeMaximalPackingFromComplex, this requires the loaded complex
+// to triangulate a disc (bdryCount > 0, i.e. not a closed/spherical
+// complex); setMode(4) itself checks this and this bridge surfaces a
+// failure as a GOPackException, same as an invalid corner/angle would for
+// computePolygonalPackingFromComplex below. Also like mode 2, entering mode
+// 4 always resets the packing's internal geometry to Euclidean, regardless
+// of the 'geometry' passed in here -- orthopack's boundary condition
+// (orthogonal to the unit circle) is inherently euclidean.
+//
+// Takes no extra parameters beyond computeMaximalPackingFromComplex's own
+// (unlike computePolygonalPackingFromComplex's corners/angles) -- orthopack,
+// like mode 1, has no notion of corners.
+//
+// Returns the same 3-row double[][] shape as computeMaximalPackingFromComplex
+// (result[0] radii, result[1] center real parts, result[2] center imaginary
+// parts); see that function's own comment for the full rationale on why this
+// MUST stay a jobjectArray of 3 jdoubleArrays, matching GOPackNative.java's
+// "public static native double[][] ..." declaration exactly.
+JNIEXPORT jobjectArray JNICALL
+Java_JNI_GOPackNative_computeOrthopackFromComplex(
+    JNIEnv* env, jclass /*clazz*/, jint nodeCount, jobjectArray flowers, jint geometry,
+    jdouble /*tolerance*/, jint maxPasses) {
+
+    try {
+        if (nodeCount <= 0) {
+            throwGOPackException(env, "GOPack native: nodeCount must be positive");
+            return nullptr;
+        }
+        const jsize expectedLen = static_cast<jsize>(nodeCount) + 1;
+        if (env->GetArrayLength(flowers) != expectedLen) {
+            throwGOPackException(env,
+                "GOPack native: flowers.length must be nodeCount+1 (index 0 unused)");
+            return nullptr;
+        }
+
+        std::vector<std::vector<gopack::Index>> flowersIn(static_cast<size_t>(expectedLen));
+        for (jsize v = 1; v < expectedLen; ++v) {
+            jobject rowObj = env->GetObjectArrayElement(flowers, v);
+            if (rowObj == nullptr) {
+                throwGOPackException(env,
+                    "GOPack native: flowers[v] must not be null for v=1..nodeCount");
+                return nullptr;
+            }
+            jintArray row = static_cast<jintArray>(rowObj);
+            jsize rowLen = env->GetArrayLength(row);
+            jint* rowData = env->GetIntArrayElements(row, nullptr);
+            std::vector<gopack::Index> flower(rowData, rowData + rowLen);
+            env->ReleaseIntArrayElements(row, rowData, JNI_ABORT);
+            env->DeleteLocalRef(rowObj);
+            flowersIn[static_cast<size_t>(v)] = std::move(flower);
+        }
+
+        gopack::Packer packer;
+        gopack::Index loaded = packer.loadComplex(static_cast<gopack::Index>(nodeCount),
+                                                    flowersIn,
+                                                    static_cast<gopack::Geometry>(geometry));
+        if (loaded <= 0) {
+            throwGOPackException(env,
+                "GOPack native: loadComplex failed (invalid/malformed complex -- see stderr)");
+            return nullptr;
+        }
+        if (packer.setMode(4) < 0) {
+            throwGOPackException(env,
+                "GOPack native: failed to set orthopack mode (setMode(4)) -- see stderr for "
+                "the specific diagnostic (most likely: the complex does not triangulate a "
+                "disc, i.e. it has no boundary)");
+            return nullptr;
+        }
+
+        // Same default-passes rationale as computeMaximalPackingFromComplex
+        // above.
+        gopack::RiffleResult result = packer.riffle(maxPasses > 0 ? maxPasses : 200);
+        if (result.cycles < 0) {
+            throwGOPackException(env, "GOPack native: riffle failed");
+            return nullptr;
+        }
+
+        // Same radii/centerX/centerY marshalling as
+        // computeMaximalPackingFromComplex above.
+        const jsize n = static_cast<jsize>(packer.nodeCount) + 1;
+
+        jdoubleArray radiiArr = env->NewDoubleArray(n);
+        if (radiiArr == nullptr) {
+            throwGOPackException(env, "Failed to allocate radii result array");
+            return nullptr;
+        }
+        env->SetDoubleArrayRegion(radiiArr, 0, n, packer.radii.data());
+
+        std::vector<jdouble> re(static_cast<size_t>(n)), im(static_cast<size_t>(n));
+        for (jsize v = 0; v < n; ++v) {
+            re[static_cast<size_t>(v)] = packer.centers[static_cast<size_t>(v)].real();
+            im[static_cast<size_t>(v)] = packer.centers[static_cast<size_t>(v)].imag();
+        }
+        jdoubleArray centerXArr = env->NewDoubleArray(n);
+        jdoubleArray centerYArr = env->NewDoubleArray(n);
+        if (centerXArr == nullptr || centerYArr == nullptr) {
+            throwGOPackException(env, "Failed to allocate centers result array");
+            return nullptr;
+        }
+        env->SetDoubleArrayRegion(centerXArr, 0, n, re.data());
+        env->SetDoubleArrayRegion(centerYArr, 0, n, im.data());
+
+        jclass doubleArrayClass = env->FindClass("[D");
+        if (doubleArrayClass == nullptr) {
+            throwGOPackException(env, "GOPack native: [D class not found");
+            return nullptr;
+        }
+        jobjectArray out = env->NewObjectArray(3, doubleArrayClass, nullptr);
+        if (out == nullptr) {
+            throwGOPackException(env, "Failed to allocate result array");
+            return nullptr;
+        }
+        env->SetObjectArrayElement(out, 0, radiiArr);
+        env->SetObjectArrayElement(out, 1, centerXArr);
+        env->SetObjectArrayElement(out, 2, centerYArr);
+        return out;
+    } catch (const std::exception& e) {
+        throwGOPackException(env, e.what());
+        return nullptr;
+    }
+}
+
 // double[][] computePolygonalPackingFromComplex(int nodeCount, int[][] flowers,
 // int geometry, int[] corners, double[] angles, int maxPasses)
 //
@@ -756,7 +892,7 @@ Java_JNI_GOPackNative_computeRandomDisc(
 JNIEXPORT jstring JNICALL
 Java_JNI_GOPackNative_nativeVersion(JNIEnv* env, jclass /*clazz*/) {
     return env->NewStringUTF(
-        "gopack-cpp 0.1.0 (max-pack mode ported; polygonal/rectangle modes pending)");
+        "gopack-cpp 0.1.0 (max-pack, polygonal/rectangle, and orthopack modes exposed via JNI)");
 }
 
 } // extern "C"
